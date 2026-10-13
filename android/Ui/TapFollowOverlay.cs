@@ -116,15 +116,50 @@ public sealed class TapFollowOverlay : IDisposable
             if (!showHint)
             {
                 // 分支识别框位于 OCR 文字矩形之外，只画细线，不把提示字或底色送回 OCR。
-                paint.Color = Color.Argb(220, 70, 215, 205); paint.SetStyle(Paint.Style.Stroke); paint.StrokeWidth = 1.5f;
+                paint.Color = PgrTheme.A(PgrTheme.Cyan, 220); paint.SetStyle(Paint.Style.Stroke); paint.StrokeWidth = 1.5f;
                 canvas.DrawRect(.75f, .75f, Math.Max(.75f, Width - .75f), Math.Max(.75f, Height - .75f), paint);
                 return;
             }
-            canvas.DrawColor(Color.Argb(9, 170, 25, 43));
-            paint.Color = Color.Argb(120, 215, 75, 86); paint.SetStyle(Paint.Style.Stroke); paint.StrokeWidth = density;
-            canvas.DrawRect(density, density, Math.Max(density, Width - density), Math.Max(density, Height - density), paint);
-            paint.SetStyle(Paint.Style.Fill); paint.Color = Color.Argb(160, 230, 222, 222); paint.TextSize = textSize;
-            canvas.DrawText("点按跟随", 7 * density, 17 * density, paint);
+            // 14-B ③: faint wash + ticked frame line + four HUD corners + dark AA label pinned inside the top-left.
+            // Everything is drawn inside this window, so the touch area is exactly the saved region (unchanged).
+            var red = Color.ParseColor("#E0485C");
+            canvas.DrawColor(PgrTheme.A(red, 9));
+            paint.SetStyle(Paint.Style.Stroke); paint.StrokeWidth = density; paint.Color = PgrTheme.A(red, 120);
+            canvas.DrawRect(density / 2, density / 2, Math.Max(density, Width - density / 2), Math.Max(density, Height - density / 2), paint);
+            paint.SetStyle(Paint.Style.Fill); paint.Color = PgrTheme.A(red, 204);
+            float tick = 5 * density;
+            foreach (float f in new[] { .25f, .5f, .75f })
+            {
+                float x = Width * f;
+                canvas.DrawRect(x, 0, x + density, Math.Min(tick, Height / 2f), paint);
+                canvas.DrawRect(x, Math.Max(Height / 2f, Height - tick), x + density, Height, paint);
+            }
+            float arm = Math.Min(14 * density, Math.Min(Width, Height) / 3f), e = 1.5f * density, sw = 2 * density;
+            paint.SetStyle(Paint.Style.Stroke); paint.StrokeWidth = sw;
+            foreach (var (cx, cy, dx, dy) in new[] { (e, e, 1f, 1f), (Width - e, e, -1f, 1f), (e, Height - e, 1f, -1f), (Width - e, Height - e, -1f, -1f) })
+            { canvas.DrawLine(cx, cy, cx + dx * arm, cy, paint); canvas.DrawLine(cx, cy, cx, cy + dy * arm, paint); }
+            // Label chip: dark slate, crimson underline, chamfered top-right, crosshair icon + 「点按跟随」 (white bold, AA on any scene).
+            paint.SetStyle(Paint.Style.Fill); paint.TextSize = textSize; paint.FakeBoldText = true;
+            const string label = "点按跟随";
+            float chipH = Math.Min(20 * density, Height), icon = 12 * density, gap = 4 * density;
+            float chipW = Math.Min(Width, 6 * density + icon + gap + paint.MeasureText(label) + 8 * density), cut = 7 * density;
+            using (var chip = new global::Android.Graphics.Path())
+            {
+                chip.MoveTo(0, 0); chip.LineTo(chipW - cut, 0); chip.LineTo(chipW, cut); chip.LineTo(chipW, chipH); chip.LineTo(0, chipH); chip.Close();
+                paint.Color = Color.Argb(235, 42, 49, 57); canvas.DrawPath(chip, paint);
+            }
+            paint.Color = red; canvas.DrawRect(0, chipH - 2 * density, chipW, chipH, paint);
+            float ix = 6 * density + icon / 2, iy = (chipH - 2 * density) / 2;
+            var pink = Color.ParseColor("#FF9AA8");
+            paint.SetStyle(Paint.Style.Stroke); paint.StrokeWidth = Math.Max(1, density); paint.Color = pink;
+            canvas.DrawCircle(ix, iy, icon * 3 / 24f, paint);
+            float a = icon * 9 / 24f, b2 = icon * 5 / 24f;
+            canvas.DrawLine(ix, iy - a, ix, iy - b2, paint); canvas.DrawLine(ix, iy + b2, ix, iy + a, paint);
+            canvas.DrawLine(ix - a, iy, ix - b2, iy, paint); canvas.DrawLine(ix + b2, iy, ix + a, iy, paint);
+            paint.SetStyle(Paint.Style.Fill); paint.Color = Color.White;
+            var fm = paint.GetFontMetrics()!;
+            canvas.DrawText(label, 6 * density + icon + gap, iy - (fm.Ascent + fm.Descent) / 2, paint);
+            paint.FakeBoldText = false;
         }
 
         public override bool OnTouchEvent(MotionEvent? e)

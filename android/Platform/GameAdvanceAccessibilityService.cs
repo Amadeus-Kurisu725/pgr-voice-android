@@ -102,6 +102,10 @@ public sealed class GameAdvanceAccessibilityService : AccessibilityService
     /// decides the result. Cancellation invalidates all queued requests. An already dispatched touch
     /// cannot be recalled by Android; its late callback is ignored and never authorizes another tap.
     /// </summary>
+    /// <summary>每次真正派发点击前调用；返回的占用在点击任务结束时归还（顶边提示条不可触碰，见 PromptBarTouchLease）。</summary>
+    public static Func<IDisposable?>? BeforeTap { get; set; }
+    public static Func<IReadOnlyList<int>>? PromptWindowIdsBeforeTap { get; set; }
+
     public static Task<GameAdvanceTapResult> TapAsync(long token, float x, float y,
         CancellationToken cancellationToken = default)
     {
@@ -122,10 +126,74 @@ public sealed class GameAdvanceAccessibilityService : AccessibilityService
             result.SetResult(new(GameAdvanceTapStatus.Cancelled, "点击已取消。"));
             return result.Task;
         }
-        // The token is checked again on the main looper immediately before Android dispatch.
-        if (service.main?.Post(() => service.DispatchOne(token, x, y, cancellationToken, result)) != true)
+        // 窗口准备和派发都归入主线程。两帧给隐藏状态进入窗口系统的机会，随后仍走原前台/遮挡检查。
+        if (service.main?.Post(() => service.PrepareTap(token, x, y, cancellationToken, result)) != true)
             result.TrySetResult(new(GameAdvanceTapStatus.Unavailable, "自动点击服务已停止。"));
         return result.Task;
+    }
+
+    void PrepareTap(long token, float x, float y, CancellationToken cancellation,
+        TaskCompletionSource<GameAdvanceTapResult> result)
+    {
+        if (cancellation.IsCancellationRequested)
+        {
+            CancelToken(token);
+            result.TrySetResult(new(GameAdvanceTapStatus.Cancelled, "点击已取消。"));
+            return;
+        }
+        IDisposable? lease;
+        IReadOnlyList<int> promptWindowIds;
+        try
+        {
+            promptWindowIds = PromptWindowIdsBeforeTap?.Invoke() ?? Array.Empty<int>();
+            lease = BeforeTap?.Invoke();
+        }
+        catch (Exception)
+        {
+            result.TrySetResult(new(GameAdvanceTapStatus.Rejected, "提示窗口未能让出触碰位置，本次未点击。"));
+            return;
+        }
+        if (lease == null) { DispatchOne(token, x, y, cancellation, result); return; }
+        // TCS 续体可能在线程池：归还也排回 main，避免旧恢复排队越过下一次主线程取得。
+        _ = result.Task.ContinueWith(_ =>
+        {
+            if (main?.Post(lease.Dispose) != true) lease.Dispose();
+        }, TaskContinuationOptions.ExecuteSynchronously);
+        long deadline = SystemClock.UptimeMillis() + 500;
+        bool preparationFinished = false;
+        void RejectPreparation() => result.TrySetResult(new(
+            cancellation.IsCancellationRequested ? GameAdvanceTapStatus.Cancelled : GameAdvanceTapStatus.Rejected,
+            "触碰准备已取消或超时，本次未点击。"));
+        bool WindowsPrepared()
+        {
+            if (result.Task.IsCompleted || SystemClock.UptimeMillis() >= deadline || promptWindowIds.Count == 0) return true;
+            try
+            {
+                var snapshots = Windows;
+                if (snapshots == null) return false;
+                try { return !snapshots.Any(w => promptWindowIds.Contains(w.Id)); }
+                finally { foreach (var window in snapshots) window.Dispose(); }
+            }
+            catch { return false; }
+        }
+        var frames = new GameAdvancePreparationFrames(() =>
+        {
+            if (result.Task.IsCompleted) return;
+            // 包含主线程长时间停顿：不能在三秒租约已归还后执行迟到的手势。
+            if (SystemClock.UptimeMillis() >= deadline) { RejectPreparation(); return; }
+            preparationFinished = true;
+            DispatchOne(token, x, y, cancellation, result);
+        }, WindowsPrepared);
+        try
+        {
+            Choreographer.Instance!.PostFrameCallback(frames);
+            if (main?.PostDelayed(() =>
+            {
+                if (!preparationFinished && !result.Task.IsCompleted) RejectPreparation();
+                Choreographer.Instance?.RemoveFrameCallback(frames);
+            }, 500) != true) RejectPreparation();
+        }
+        catch (Exception) { RejectPreparation(); }
     }
 
     /// <summary>Synchronous invalidation prevents already queued work from becoming a new touch.</summary>
@@ -494,6 +562,17 @@ public sealed class GameAdvanceAccessibilityService : AccessibilityService
         public TaskCompletionSource<GameAdvanceTapResult> Result { get; } = result;
         public GameAdvanceGestureCallback? Callback;
         public CancellationTokenRegistration Cancellation;
+    }
+}
+
+// 在第二次 vsync 的输入阶段前，前一帧的窗口遍历已有机会提交。最终安全性仍由 DispatchOne 检查。
+sealed class GameAdvancePreparationFrames(System.Action ready, Func<bool> prepared) : Java.Lang.Object, Choreographer.IFrameCallback
+{
+    int remaining = 2;
+    public void DoFrame(long frameTimeNanos)
+    {
+        if (--remaining <= 0 && prepared()) ready();
+        else Choreographer.Instance!.PostFrameCallback(this);
     }
 }
 

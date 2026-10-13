@@ -15,6 +15,8 @@ public interface IAudioOutput : IDisposable
     void Play(string file);
     /// <summary>返回本次播放请求的唯一标识；调用方仍须绑定章节、节点和自动播放代次。</summary>
     long PlayTagged(string file);
+    /// <summary>游戏原配占位：照常计时与回调，但不申请音频焦点，避免“配音优先”压低游戏自己的原声。</summary>
+    long PlayTaggedWithoutFocus(string file) => PlayTagged(file);
     void Stop();
     void Pause();
     void SetVolume(float value);

@@ -19,16 +19,28 @@ public sealed class AdvanceRegionOverlay : IDisposable
         root=new FrameLayout(context);
         selection=new SelectionView(context,width,height);
         root.AddView(selection,new FrameLayout.LayoutParams(-1,-1));
+        // 14-B: floating dark S card at the top left (clear of NEXT / dialogue at the lower right); readout of the box size.
         var panel=new LinearLayout(context){Orientation=Orientation.Vertical};
-        panel.SetPadding(20,12,20,12);panel.SetBackgroundColor(Color.Argb(235,22,25,30));
-        var help=new TextView(context){Text="拖出游戏“下一句”的触碰范围\n点按跟随：你点框内哪里就触碰哪里。自动播放：点击框中心。避开选项和系统栏。",TextSize=15};
-        help.SetTextColor(Color.White);panel.AddView(help);
+        panel.SetPadding(PgrTheme.Dp(context,14),PgrTheme.Dp(context,10),PgrTheme.Dp(context,14),PgrTheme.Dp(context,16));
+        panel.Background=new DarkPanelDrawable(context.Resources!.DisplayMetrics!.Density,DecoTier.S){CutBottomRightDp=14,ShowEmblem=false,Inscription=false,Watermark=false};
+        var code=PgrTheme.Eyebrow(context,"ADVANCE AREA");code.ImportantForAccessibility=ImportantForAccessibility.No;code.SetTextColor(PgrArt.GoldLine);panel.AddView(code);
+        var title=new TextView(context){Text="拖出游戏“下一句”的触碰范围",TextSize=15};
+        title.SetTextColor(Color.White);title.SetTypeface(PgrTheme.SansBold,TypefaceStyle.Bold);panel.AddView(title);
+        var help=new TextView(context){Text="点按跟随：你点框内哪里就触碰哪里。自动播放：点击框中心。避开选项和系统栏。",TextSize=13};
+        help.SetTextColor(PgrTheme.A(Color.White,215));help.SetLineSpacing(PgrTheme.Dp(context,3),1);panel.AddView(help);
+        var readout=new TextView(context){TextSize=12,Visibility=ViewStates.Gone};readout.SetTextColor(PgrArt.GoldLine);PgrTheme.Tabular(readout);
+        readout.SetPadding(0,PgrTheme.Dp(context,4),0,0);panel.AddView(readout);
+        selection.Changed=r=>{readout.Visibility=r==null?ViewStates.Gone:ViewStates.Visible;if(r!=null)readout.Text=$"框中心 = 自动播放点击位置 · {r.Width*100:0}% × {r.Height*100:0}%";};
         var row=new LinearLayout(context){Orientation=Orientation.Horizontal};panel.AddView(row);
         var save=new Button(context){Text="保存区域"};var cancel=new Button(context){Text="取消"};
-        row.AddView(save,new LinearLayout.LayoutParams(0,-2,1));row.AddView(cancel,new LinearLayout.LayoutParams(0,-2,1));
-        save.Click+=(_,_)=>{if(selection.Region is { } region){Dispose();completed(region);}else help.Text="请先在游戏的下一句区域拖出一个方框。";};
+        PgrTheme.StyleButton(save,primary:true);PgrTheme.StyleButton(cancel);
+        PgrUi.Style(save,Xb.Primary,"bookmark",center:true);PgrUi.Style(cancel,Xb.Dark,"close",center:true);
+        row.AddView(save,new LinearLayout.LayoutParams(0,PgrTheme.Dp(context,48),1){RightMargin=PgrTheme.Dp(context,4),TopMargin=PgrTheme.Dp(context,8)});
+        row.AddView(cancel,new LinearLayout.LayoutParams(0,PgrTheme.Dp(context,48),1){LeftMargin=PgrTheme.Dp(context,4),TopMargin=PgrTheme.Dp(context,8)});
+        save.Click+=(_,_)=>{if(selection.Region is { } region){Dispose();completed(region);}else{help.Text="请先在游戏的下一句区域拖出一个方框。";help.SetTextColor(Color.Argb(255,255,170,180));}};
         cancel.Click+=(_,_)=>{Dispose();completed(null);};
-        root.AddView(panel,new FrameLayout.LayoutParams(-1,-2,GravityFlags.Top));
+        int cardWidth=Math.Min(PgrTheme.Dp(context,400),(int)(width*.48f));
+        root.AddView(panel,new FrameLayout.LayoutParams(cardWidth,-2,GravityFlags.Top|GravityFlags.Left){LeftMargin=PgrTheme.Dp(context,40),TopMargin=PgrTheme.Dp(context,28)});
     }
     public void Show()
     {
@@ -45,16 +57,34 @@ public sealed class AdvanceRegionOverlay : IDisposable
         readonly int displayWidth,displayHeight;
         float startX,startY;
         public ScreenRegion? Region{get;private set;}
+        public Action<ScreenRegion?>? Changed;
         public SelectionView(Context context,int width,int height):base(context){displayWidth=width;displayHeight=height;}
         public SelectionView(IntPtr handle,JniHandleOwnership ownership):base(handle,ownership){}
         protected override void OnDraw(Canvas canvas)
         {
-            canvas.DrawColor(Color.Argb(35,0,0,0));
-            if(Region is not { } r)return;
+            // 14-B: dim outside the box at 42 % (whole screen while nothing is drawn); rulers only on the screen's top / left edges.
+            var dim=Color.Argb(107,0x0E,0x12,0x18);
+            if(Region is not { } r){canvas.DrawColor(dim);return;}
             int[] pos=new int[2];GetLocationOnScreen(pos);
             using var bounds=new RectF(r.Left*displayWidth-pos[0],r.Top*displayHeight-pos[1],(r.Left+r.Width)*displayWidth-pos[0],(r.Top+r.Height)*displayHeight-pos[1]);
-            paint.Color=PgrTheme.Red;paint.SetStyle(Paint.Style.Stroke);paint.StrokeWidth=3;
-            canvas.DrawRect(bounds,paint);canvas.DrawCircle(bounds.CenterX(),bounds.CenterY(),9,paint);
+            float dp=Resources!.DisplayMetrics!.Density;
+            paint.Color=dim;paint.SetStyle(Paint.Style.Fill);
+            canvas.DrawRect(0,0,Width,bounds.Top,paint);canvas.DrawRect(0,bounds.Bottom,Width,Height,paint);
+            canvas.DrawRect(0,bounds.Top,bounds.Left,bounds.Bottom,paint);canvas.DrawRect(bounds.Right,bounds.Top,Width,bounds.Bottom,paint);
+            paint.Color=PgrArt.GoldLine;paint.StrokeWidth=Math.Max(2,1.5f*dp);
+            canvas.DrawLine(bounds.Left,0,bounds.Left,10*dp,paint);canvas.DrawLine(bounds.Right,0,bounds.Right,10*dp,paint);
+            canvas.DrawLine(0,bounds.Top,10*dp,bounds.Top,paint);canvas.DrawLine(0,bounds.Bottom,10*dp,bounds.Bottom,paint);
+            paint.StrokeWidth=Math.Max(1,dp);paint.Color=PgrTheme.A(PgrArt.GoldLine,140);
+            canvas.DrawLine(bounds.Left,5*dp,bounds.Right,5*dp,paint);canvas.DrawLine(5*dp,bounds.Top,5*dp,bounds.Bottom,paint);
+            paint.Color=Color.Argb(36,PgrTheme.Red.R,PgrTheme.Red.G,PgrTheme.Red.B);paint.SetStyle(Paint.Style.Fill);canvas.DrawRect(bounds,paint);
+            paint.Color=PgrTheme.Red;paint.SetStyle(Paint.Style.Stroke);paint.StrokeWidth=Math.Max(3,2*dp);
+            canvas.DrawRect(bounds,paint);
+            // Centre crosshair = the point auto play taps.
+            float cx=bounds.CenterX(),cy=bounds.CenterY(),arm=9*dp;
+            paint.Color=PgrTheme.Foreground;paint.StrokeWidth=Math.Max(2,1.5f*dp);
+            canvas.DrawLine(cx-arm,cy,cx-3*dp,cy,paint);canvas.DrawLine(cx+3*dp,cy,cx+arm,cy,paint);
+            canvas.DrawLine(cx,cy-arm,cx,cy-3*dp,paint);canvas.DrawLine(cx,cy+3*dp,cx,cy+arm,paint);
+            paint.Color=PgrTheme.Red;canvas.DrawCircle(cx,cy,Math.Max(9,6*dp),paint);
         }
         public override bool OnTouchEvent(MotionEvent? e)
         {
@@ -65,7 +95,7 @@ public sealed class AdvanceRegionOverlay : IDisposable
             {
                 float w=Math.Abs(x-startX),h=Math.Abs(y-startY);
                 Region=w*displayWidth>=12&&h*displayHeight>=12?new(Math.Min(x,startX),Math.Min(y,startY),w,h):null;
-                Invalidate();if(e.Action==MotionEventActions.Up)PerformClick();
+                Invalidate();Changed?.Invoke(Region);if(e.Action==MotionEventActions.Up)PerformClick();
             }
             return true;
         }

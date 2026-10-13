@@ -105,7 +105,7 @@ public sealed partial class AppSession
             expected?.Id != option.Id || first == null || !CanAutoPlayLine(engine.Pack, first))
         {
             // 人工改选仍允许播放，但不能暗中把另一支当作默认路线继续自动点击。
-            Command(e => e.SelectBranch(e.AvailableOptions.FindIndex(o => ReferenceEquals(o, option))));
+            Command(e => { ExplorationMemory.RecordCurrent(e, option); e.SelectBranch(e.AvailableOptions.FindIndex(o => ReferenceEquals(o, option))); });
             Status = "已按你的确认选支；这不是当前可自动续播的默认路线，请核对后手动开启点按跟随。"; Notify();
             return true;
         }
@@ -127,7 +127,7 @@ public sealed partial class AppSession
             request.Source.Intent.DefaultOption == 0 ||
             !DefaultBranchPolicy.TryChoice(engine, request.Source.Intent.DefaultOption, out var expected, out _) || expected?.Id != option.Id ||
             !DefaultBranchDisplayPolicy.TryGetDisplayAnchor(engine, request.Source.Intent.DefaultOption, out _, out var anchor) || anchor == null) return "";
-        return "游戏当前应显示：" + anchor.Speaker + "：" + anchor.Text +
+        return "游戏当前应显示：" + SpeakerLabel(anchor.Speaker) + "：" + anchor.Text +
             "\n请核对这句后确认。软件会先播放所选选项，再播放当前台词，中间不会点击游戏。";
     }
 }

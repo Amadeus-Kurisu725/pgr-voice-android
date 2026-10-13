@@ -436,7 +436,7 @@ public sealed partial class AppSession
             if (!ReferenceEquals(e, expectedEngine)) throw new InvalidOperationException("章节已变化，请重新选择分支。");
             int i = e.AvailableOptions.FindIndex(o => ReferenceEquals(o, option));
             if (i < 0) throw new InvalidOperationException("分支选项已变化。");
-            overlayBrowseDirectory = false; e.SelectBranch(i);
+            overlayBrowseDirectory = false; ExplorationMemory.RecordCurrent(e, option); e.SelectBranch(i);
         });
         if (resume && intent != null && BranchIntentEnvironmentValid(intent) && Engine == expectedEngine &&
             expectedEngine.Mode == RunMode.Following && expectedEngine.Current is { Kind: "line" } node && node.PathId == option.PathId)

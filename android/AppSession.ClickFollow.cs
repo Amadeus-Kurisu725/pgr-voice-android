@@ -137,6 +137,8 @@ public sealed partial class AppSession
                 }
                 // 克隆已证这些 Next 只经过无对白 return/merge；不得再给游戏补点，也不自动选择。
                 for (int i = 0; i < plan.Steps; i++) engine.Next(true);
+                // 现稿续接：段尾出口未核实而包内写有下一处时按现稿继续（菜单静音打开），不额外点击游戏。
+                if (engine.Mode == RunMode.Gap) TryFollowDraftContinuation(engine);
                 Diagnostics.Log("点按跟随推进", $"{node} → {engine.CurrentId}");
                 if (TryOfferCommonAutoResume(engine)) return;
                 if (engine.Mode != RunMode.Following || engine.Current?.Kind != "line")

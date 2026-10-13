@@ -121,7 +121,8 @@ public sealed partial class AppSession
             confirmationText.Length == 0 ? title + "\n\n" + detail : confirmationText, dialogue);
     }
 
-    static string BrowseSpeaker(Node node) => string.IsNullOrWhiteSpace(node.Speaker) ? "旁白" : node.Speaker;
+    internal static string BrowseSpeaker(Node node) => SpeakerLabel(node.Speaker);
+    internal static string SpeakerLabel(string? speaker) => string.IsNullOrWhiteSpace(speaker) ? "旁白" : speaker;
     static bool BrowseNodeValid(PlaybackEngine engine, Node node) => !node.Archived &&
         engine.Pack.ById.TryGetValue(node.Id, out var current) && ReferenceEquals(current, node);
     static string BrowseSectionTitle(PlaybackEngine engine, string? id) =>
@@ -147,7 +148,7 @@ public sealed partial class AppSession
         bool original = engine.Mode == RunMode.Original;
         foreach (var (node, index) in lines.Select((n, i) => (n, i)))
         {
-            string context = engine.LocationContext(node), notice = engine.Pack.AudioNotice(node);
+            string context = engine.LocationContext(node), notice = PgrVoice.Listening.PendingVoice.Notice(engine.Pack, node);
             items.Add(BrowseItem($"{index + 1}. {BrowseSpeaker(node)}：{node.Text}",
                 context + (notice.Length == 0 ? "" : "\n" + notice), () => ConfirmLine(node.Id, original),
                 () => BrowseNodeValid(engine, node), node.Id == engine.CurrentId,
@@ -238,7 +239,7 @@ public sealed partial class AppSession
         }
         foreach (var (node, index) in lines.Select((n, i) => (n, i)))
         {
-            string context = engine.LocationContext(node), notice = engine.Pack.AudioNotice(node);
+            string context = engine.LocationContext(node), notice = PgrVoice.Listening.PendingVoice.Notice(engine.Pack, node);
             items.Add(BrowseItem($"{index + 1}. {BrowseSpeaker(node)}：{node.Text}",
                 context + (notice.Length == 0 ? "" : "\n" + notice), () => ConfirmLine(node.Id),
                 () => BrowseNodeValid(engine, node), node.Id == engine.CurrentId,
@@ -270,7 +271,10 @@ public sealed partial class AppSession
             else if (branchBrowseStopped is { } stopped && ReferenceEquals(stopped.Engine, engine) && ReferenceEquals(stopped.Menu, engine.Current))
                 hint = stopped.Reason + " 下面的确认只播放所选分支，不会自动重开跟随。";
             actions.Add(BrowseItem("游戏选好后，识别下一句", "只识别本次完整对白，请核对台词与路线；未核连接仍等待。", RequestBranchAnchorOcr, confirmation: false));
-            foreach (var option in engine.AvailableOptions)
+            // 0.4.7 同回应隐藏：与刚选项回应相同的选项（如 19-14 答错回来）游戏里已不显示，这里同样不列出。
+            var hiddenOptions = DefaultBranchPolicy.HiddenOptions(engine);
+            if (hiddenOptions.Count > 0) hint += " 与刚才回应相同的选项已隐藏。";
+            foreach (var option in engine.AvailableOptions.Where(o => hiddenOptions.All(h => h.Id != o.Id)))
             {
                 string displayDescription = DefaultBranchBrowseDisplayDescription(engine, option);
                 items.Add(BrowseItem(engine.Current?.MenuType is "interaction" or "topics" ?
@@ -291,6 +295,17 @@ public sealed partial class AppSession
                     () => Command(e => { int i = e.ResumeMenus.FindIndex(m => ReferenceEquals(m, menu)); if (i < 0) throw new InvalidOperationException("续接菜单已变化。"); overlayBrowseDirectory = false; e.SelectContinuation(i); }),
                     () => engine.Mode == RunMode.Gap && BrowseNodeValid(engine, menu) && engine.ResumeMenus.Any(m => ReferenceEquals(m, menu)),
                     confirmationTitle: "确认游戏当前的续接菜单"));
+        }
+        else if (!overlayBrowseDirectory && engine.Mode == RunMode.Gap && DeclaredContinuation is { } declared)
+        {
+            // 现稿续接：出口未逐句核实而包内写有下一处（通常已自动续接；此处供手动使用）。
+            var target = declared.Target;
+            hint = UiText.DraftOverlayHint;
+            items.Add(BrowseItem(target.Kind == "line" ? (string.IsNullOrWhiteSpace(target.Speaker) ? "旁白" : target.Speaker) + "：" + target.Text : target.Text,
+                engine.LocationContext(target),
+                () => { overlayBrowseDirectory = false; FollowDeclaredContinuation(); },
+                () => engine.Mode == RunMode.Gap && BrowseNodeValid(engine, target) && DeclaredContinuation?.Target == target,
+                confirmationTitle: UiText.DraftOverlayTitle));
         }
         else
         {

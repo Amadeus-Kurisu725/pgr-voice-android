@@ -1,0 +1,45 @@
+using PgrVoice;
+using PgrVoice.AndroidApp;
+
+int passed = 0, failed = 0;
+void Check(string name, bool ok, string detail = "") { if (ok) passed++; else failed++; Console.WriteLine((ok ? "PASS " : "FAIL ") + name + (ok || detail.Length == 0 ? "" : "：" + detail)); }
+
+// ---- 取值 ----
+var cats = ChapterCatalog.Categories;
+Check("共 13 类，第一类叫「主线」", cats.Count == 13 && cats[0] == "主线", string.Join(",", cats));
+var missing = cats.Where(c => !CategoryNames.English.ContainsKey(c)).ToList();
+Check("每一类都有英文名（不落到 OTHER）", missing.Count == 0, string.Join(",", missing));
+Check("其他章节的英文为 OTHER", CategoryNames.En(ChapterCatalog.Other) == "OTHER");
+Check("英文名全大写、无省略号", CategoryNames.English.Values.All(e => e == e.ToUpperInvariant() && !e.Contains('…') && !e.Contains("...")));
+Check("主线 → MAIN STORY，外篇剧情 → SIDE STORY", CategoryNames.En("主线") == "MAIN STORY" && CategoryNames.En("外篇剧情") == "SIDE STORY");
+
+// ---- 适配规则（宽度模型：每字 advance em × 字号 + 字距 em × 字号）----
+Func<float, float, float> Model(string text, float advanceEm) => (ls, sp) => text.Length * (advanceEm + ls) * sp;
+var gv = Model("GOLDEN VORTEX", .62f);
+var fit = CategoryNames.FitEnglish(gv, 200);
+Check("放得下：保持 .14em / 8.5sp、不换行", fit == new CategoryNames.EnFit(.14f, 8.5f, false), fit.ToString());
+float base14 = gv(.14f, 8.5f);
+fit = CategoryNames.FitEnglish(gv, base14 - 4);
+Check("略窄：先收字距、字号不变、不换行", fit.SpacingEm < .14f && fit.SizeSp == 8.5f && !fit.Wrap && gv(fit.SpacingEm, fit.SizeSp) <= base14 - 4 + .5f, fit.ToString());
+float at04 = gv(.04f, 8.5f);
+fit = CategoryNames.FitEnglish(gv, at04 - 3);
+Check("再窄：字距到 .04em 后降字号（≥7sp）、不换行", Math.Abs(fit.SpacingEm - .04f) < .001f && fit.SizeSp < 8.5f && fit.SizeSp >= 7f && !fit.Wrap, fit.ToString());
+fit = CategoryNames.FitEnglish(gv, 20);
+Check("放不下：停在 .04em / 7sp 并换行（不截断）", Math.Abs(fit.SpacingEm - .04f) < .001f && fit.SizeSp == 7f && fit.Wrap, fit.ToString());
+
+// ---- dp 估算：360dp 竖屏两列、320dp 小屏两列、横屏 560dp 面板三列 ----
+// 可用宽 =（屏/面板宽 − 面板左右内边距 16×2 − 列间距）/ 列数 − 边框 1×2 − 名称左右内边距 10×2。
+float Avail(float width, int columns, float gap) => (width - 32 - gap * (columns - 1)) / columns - 2 - 20;
+var widths = new (string Name, float Dp)[] { ("360dp 竖屏", Avail(360, 2, 8)), ("320dp 小屏", Avail(320, 2, 8)), ("横屏 560dp 面板", Avail(560, 3, 7)) };
+string longestZh = cats.OrderByDescending(c => c.Length).First();
+string longestEn = CategoryNames.English.Values.OrderByDescending(e => e.Length).First();
+foreach (var (n, w) in widths)
+{
+    // 中文 15.5sp，CJK 每字 1em（字体缩放 1.0）；英文 8.5sp 粗体窄体，保守按每字 .62em + .14em 字距。
+    Check($"{n}（可用 {w:0.#}dp）：最长中文「{longestZh}」15.5sp 单行放得下", longestZh.Length * 15.5f <= w, $"{longestZh.Length * 15.5f}dp");
+    var f = CategoryNames.FitEnglish(Model(longestEn, .62f), w);
+    Check($"{n}：最长英文「{longestEn}」原样 .14em / 8.5sp 单行放得下", f == new CategoryNames.EnFit(.14f, 8.5f, false), $"{Model(longestEn, .62f)(.14f, 8.5f):0.#}dp {f}");
+}
+
+Console.WriteLine($"CategoryNames: {passed}/{passed + failed} passed");
+return failed == 0 ? 0 : 1;

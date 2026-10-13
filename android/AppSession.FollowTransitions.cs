@@ -195,6 +195,7 @@ public sealed partial class AppSession
         Invalidate(); audio.Stop();
         if (interaction && !engine.OpenGameMenu(confirmation.Menu.Id, confirmation.Menu.SectionId))
         { Status = engine.NavigationError; Notify(); return; }
+        ExplorationMemory.RecordCurrent(engine, option); // 0.4.7 同回应隐藏：记下所选项
         engine.SelectBranch(engine.AvailableOptions.FindIndex(o => o.Id == option.Id));
         if (engine.CurrentId != option.TargetId)
         { Status = "分支位置未能确认，请手动核对后继续。"; Notify(); return; }
@@ -267,13 +268,21 @@ public sealed partial class AppSession
         branchAutoReturn = new(engine, AutoGamePackage, clickTarget, clickDisplayKey, Screen.SessionId, Screen.DisplayState);
     }
 
-    Node? AutomaticBranchMenu(PlaybackEngine engine, out int steps)
+    Node? AutomaticBranchMenu(PlaybackEngine engine, out int steps) => AutomaticBranchMenu(engine, out steps, out _);
+
+    /// <param name="declared">true：支线段尾出口未核实，按包内登记的返回连接到达菜单；进入时先 Next 到边界再定位菜单。</param>
+    Node? AutomaticBranchMenu(PlaybackEngine engine, out int steps, out bool declared)
     {
-        steps = 1;
-        if ((!Settings.BranchAutoFollow && !AutomaticBranchRoutesEnabled) || engine.Current is not { Kind: "line", NextId: not null } current) return null;
+        steps = 1; declared = false;
+        if (engine.Current is not { Kind: "line", NextId: not null } current) return null;
+        bool singleNext = engine.Pack.ById.TryGetValue(current.NextId, out var nextMenu) && nextMenu is { Kind: "choice", Archived: false } && nextMenu.Options.Count == 1;
+        if (!Settings.BranchAutoFollow && !AutomaticBranchRoutesEnabled && !singleNext) return null;
         Node? menu = null;
         if ((DefaultAutoLinePermitted(engine) || VerifiedCommonLinePermitted(engine)) &&
             DefaultBranchPolicy.TryNext(engine, out var next, out steps, includeChoice: true) && next?.Kind == "choice") menu = next;
+        else if ((DefaultAutoLinePermitted(engine) || VerifiedCommonLinePermitted(engine)) &&
+            DeclaredContinuationPolicy.TryResolve(engine, out var continuation) && continuation?.Target.Kind == "choice")
+        { menu = continuation.Target; steps = 1; declared = true; }
         else
         {
             var decision = engine.EvaluateCommonAutoPlayNext();
@@ -285,12 +294,21 @@ public sealed partial class AppSession
         // 用真实导航器克隆核全部无正文控制点，不多点游戏、不略过任何正文。
         var probe = new PlaybackEngine(engine.Pack);
         if (!probe.ImportNavigation(engine.ExportNavigation()) || !probe.ConfirmCurrentPosition()) return null;
-        for (int i = 0; i < steps; i++) probe.Next(true);
-        if (probe.CurrentId != menu.Id) return null;
+        ExplorationMemory.CopyTo(engine, probe); // 同回应隐藏 / 探索顺序：探测沿用本次已选记录
+        if (!EnterAutomaticBranchMenu(probe, menu, steps, declared)) return null;
+        // 0.4.7 单选项菜单：无论分支设置如何都直接进入唯一选项，不停下等待。
+        if (DefaultBranchPolicy.IsSingleOptionMenu(probe) && DefaultBranchPolicy.TryChoice(probe, 1, out _, out _)) return menu;
         if (Settings.AutoPlayConfirmBranch)
             return ConfirmedBranchPolicy.Create(probe).Cards.Count > 0 ? menu : null;
         if (Settings.AutoPlayDefaultBranchEnabled && DefaultBranchPolicy.TryChoice(probe, Settings.DefaultBranchOption, out _, out _)) return menu;
         return Settings.BranchAutoFollow && BranchFollowPolicy.IsEligibleManualMenu(probe, menu.Id, out _) ? menu : null;
+    }
+
+    static bool EnterAutomaticBranchMenu(PlaybackEngine engine, Node menu, int steps, bool declared)
+    {
+        for (int i = 0; i < steps; i++) engine.Next(true);
+        if (declared && (engine.Mode != RunMode.Gap || !engine.OpenGameMenu(menu.Id, menu.SectionId))) return false;
+        return engine.CurrentId == menu.Id;
     }
 
     bool TryAdvanceAutoIntoBranch(PlaybackEngine engine, long epoch)
@@ -327,13 +345,12 @@ public sealed partial class AppSession
                 main.PostDelayed(() => Post(() =>
                 {
                     if (!StillCurrent() || !CheckAutoPlaybackEnvironment()) return;
-                    if (AutomaticBranchMenu(engine, out int steps)?.Id != menuId)
+                    if (AutomaticBranchMenu(engine, out int steps, out bool declared) is not { } menu || menu.Id != menuId)
                     { PauseAutoPlayback("分支路线已变化，请手动核对；不会再次点击。"); return; }
-                    for (int i = 0; i < steps; i++) engine.Next(true);
-                    if (engine.CurrentId != menuId || engine.Mode != RunMode.Choice)
+                    if (!EnterAutomaticBranchMenu(engine, menu, steps, declared) || engine.CurrentId != menuId || engine.Mode != RunMode.Choice)
                     { PauseAutoPlayback("没有进入预期分支，请手动核对游戏位置。"); return; }
                     // 默认模式直接配已选项，游戏选项仍由玩家点击。
-                    if (Settings.AutoPlayConfirmBranch ? BeginConfirmedBranchWait(engine, target, displayKey) : BeginDefaultBranchWait(engine, target, displayKey))
+                    if (Settings.AutoPlayConfirmBranch && !DefaultBranchPolicy.IsSingleOptionMenu(engine) ? BeginConfirmedBranchWait(engine, target, displayKey) : BeginDefaultBranchWait(engine, target, displayKey))
                     { Diagnostics.Advance(); return; }
                     // 本次 NEXT 已结束自动周期。玩家先在游戏选完，再在小窗明确确认同项。
                     CancelAutoPlayback();

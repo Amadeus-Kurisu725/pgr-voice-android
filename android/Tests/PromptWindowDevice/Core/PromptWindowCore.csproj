@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
+    <AssemblyName>PgrVoice.Core</AssemblyName><EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <ProductRoot>$(MSBuildThisFileDirectory)..\..\..\..\</ProductRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(ProductRoot)core\**\*.cs" Exclude="$(ProductRoot)core\obj\**;$(ProductRoot)core\bin\**" />
+    <Compile Include="$(ProductRoot)src\Domain.cs;$(ProductRoot)src\Navigation.cs;$(ProductRoot)src\ObservedNavigation.cs;$(ProductRoot)src\ProgressStore.cs;$(ProductRoot)src\Matcher.cs;$(ProductRoot)src\DialogueFrameAnalysis.cs;$(ProductRoot)src\StateSaveQueue.cs" />
+    <EmbeddedResource Include="$(ProductRoot)core\ChapterCatalog.json" LogicalName="PgrVoice.ChapterCatalog.json" />
+    <EmbeddedResource Include="$(ProductRoot)core\SectionOrder.json" LogicalName="PgrVoice.SectionOrder.json" />
+    <EmbeddedResource Include="$(ProductRoot)core\NativeVoiceCatalog.json" LogicalName="PgrVoice.NativeVoiceCatalog.json" />
+  </ItemGroup>
+</Project>

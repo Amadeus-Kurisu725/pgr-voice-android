@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Mirror of Ui/PgrTheme.cs geometry tokens. -->
+<resources>
+  <dimen name="pgr_space_xs">4dp</dimen>
+  <dimen name="pgr_space_s">8dp</dimen>
+  <dimen name="pgr_space_m">12dp</dimen>
+  <dimen name="pgr_space_l">16dp</dimen>
+  <dimen name="pgr_space_xl">24dp</dimen>
+  <dimen name="pgr_cut_large">14dp</dimen>
+  <dimen name="pgr_cut_medium">9dp</dimen>
+  <dimen name="pgr_cut_small">6dp</dimen>
+  <dimen name="pgr_hairline">0.75dp</dimen>
+  <dimen name="pgr_accent_bar">3dp</dimen>
+  <dimen name="pgr_touch">48dp</dimen>
+  <dimen name="pgr_text_display">26sp</dimen>
+  <dimen name="pgr_text_title">21sp</dimen>
+  <dimen name="pgr_text_heading">17sp</dimen>
+  <dimen name="pgr_text_body">15sp</dimen>
+  <dimen name="pgr_text_small">13sp</dimen>
+  <dimen name="pgr_text_caption">12sp</dimen>
+  <dimen name="pgr_text_label">11sp</dimen>
+  <dimen name="pgr_text_micro">10sp</dimen>
+</resources>

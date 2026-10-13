@@ -1,0 +1,108 @@
+// 自动点击期间顶边提示条不接收触碰：设置与恢复（完成 / 取消 / 异常 / 超时 / 重叠点击）。
+// 模拟 GameAdvanceAccessibilityService.TapAsync 的接法：BeforeTap 取占用，点击任务结束（任何结果）时 Dispose。
+using PgrVoice.AndroidApp;
+
+int passed = 0, failed = 0;
+void Check(string name, bool ok) { if (ok) passed++; else failed++; Console.WriteLine((ok ? "PASS " : "FAIL ") + name); }
+
+(PromptBarTouchLease lease, List<bool> calls, List<(Action Run, int Ms)> timers) Make()
+{
+    var calls = new List<bool>(); var timers = new List<(Action, int)>();
+    return (new PromptBarTouchLease(calls.Add, (a, ms) => timers.Add((a, ms))), calls, timers);
+}
+
+// 与 TapAsync 相同：取占用 → 任务结束时归还。
+Task<string> Tap(PromptBarTouchLease lease, TaskCompletionSource<string> gesture)
+{
+    var hold = lease.Acquire();
+    _ = gesture.Task.ContinueWith(_ => hold.Dispose(), TaskContinuationOptions.ExecuteSynchronously);
+    return gesture.Task;
+}
+
+{
+    var (lease, calls, timers) = Make();
+    var g = new TaskCompletionSource<string>();
+    _ = Tap(lease, g);
+    Check("完成：派发前设为不可触碰", calls.SequenceEqual(new[] { false }) && lease.Suspended);
+    Check("完成：登记 3 秒超时兜底", timers.Count == 1 && timers[0].Ms == PromptBarTouchLease.DefaultTimeoutMs);
+    g.SetResult("Completed");
+    Check("完成：手势完成后恢复可触碰", calls.SequenceEqual(new[] { false, true }) && !lease.Suspended);
+    timers[0].Run();
+    Check("完成：之后超时到点不再重复恢复", calls.Count == 2);
+}
+{
+    var (lease, calls, _) = Make();
+    var g = new TaskCompletionSource<string>();
+    _ = Tap(lease, g);
+    g.SetResult("Cancelled");
+    Check("取消：手势取消后恢复可触碰", calls.SequenceEqual(new[] { false, true }) && !lease.Suspended);
+}
+{
+    var (lease, calls, _) = Make();
+    var g = new TaskCompletionSource<string>();
+    _ = Tap(lease, g);
+    g.SetCanceled();
+    Check("取消令牌：任务被取消也恢复", calls.SequenceEqual(new[] { false, true }));
+    var (lease2, calls2, _) = Make();
+    var g2 = new TaskCompletionSource<string>();
+    _ = Tap(lease2, g2);
+    g2.SetException(new InvalidOperationException("dispatch failed"));
+    Check("异常：派发异常也恢复", calls2.SequenceEqual(new[] { false, true }) && !lease2.Suspended);
+}
+{
+    var (lease, calls, timers) = Make();
+    var g = new TaskCompletionSource<string>();
+    _ = Tap(lease, g);
+    timers[0].Run();
+    Check("超时：回调一直不来，超时后强制恢复", calls.SequenceEqual(new[] { false, true }) && !lease.Suspended);
+    g.SetResult("Completed");
+    Check("超时：迟到的完成回调不再改动", calls.Count == 2 && !lease.Suspended);
+}
+{
+    var (lease, calls, timers) = Make();
+    var a = new TaskCompletionSource<string>(); var b = new TaskCompletionSource<string>();
+    _ = Tap(lease, a); _ = Tap(lease, b);
+    Check("重叠：两次点击只设一次不可触碰", calls.SequenceEqual(new[] { false }));
+    a.SetResult("Completed");
+    Check("重叠：第一次结束仍不可触碰", calls.Count == 1 && lease.Suspended);
+    b.SetResult("Cancelled");
+    Check("重叠：最后一次结束才恢复", calls.SequenceEqual(new[] { false, true }) && !lease.Suspended);
+    foreach (var t in timers) t.Run();
+    Check("重叠：超时兜底不会把计数减成负数", calls.Count == 2 && !lease.Suspended);
+    _ = Tap(lease, new TaskCompletionSource<string>());
+    Check("重叠：之后的新点击照常设为不可触碰", calls.Count == 3 && !calls[2] && lease.Suspended);
+}
+{
+    var calls = new List<bool>(); int n = 0;
+    var lease = new PromptBarTouchLease(t => { calls.Add(t); if (n++ == 0) throw new InvalidOperationException("window gone"); }, (_, _) => throw new InvalidOperationException("no looper"));
+    var h = lease.Acquire(); h.Dispose(); h.Dispose();
+    Check("窗口 / 计时异常：不抛出，仍恢复且只恢复一次", calls.SequenceEqual(new[] { false, true }) && !lease.Suspended);
+}
+
+{
+    // 真实任务完成可在线程池归还；下一点击也可能同时开始。
+    using var restoring = new ManualResetEventSlim();
+    using var finishRestore = new ManualResetEventSlim();
+    using var acquiring = new ManualResetEventSlim();
+    bool touchable = true;
+    var lease = new PromptBarTouchLease(value =>
+    {
+        if (value) { restoring.Set(); finishRestore.Wait(); }
+        touchable = value;
+    }, (_, _) => { });
+    var old = lease.Acquire();
+    var release = Task.Run(old.Dispose);
+    if (!restoring.Wait(2000)) throw new Exception("未进入并发归还前提");
+    var acquire = Task.Run(() => { acquiring.Set(); return lease.Acquire(); });
+    if (!acquiring.Wait(2000)) throw new Exception("未进入并发取得前提");
+    // 旧实现会在恢复通知阻塞时完成新取得，随后被旧恢复覆盖；新版把通知与计数串行。
+    _ = acquire.Wait(100);
+    finishRestore.Set();
+    Task.WaitAll(release, acquire);
+    Check("并发：旧归还不能覆盖仍活跃的新占用", lease.Suspended && !touchable);
+    acquire.Result.Dispose();
+    Check("并发：新占用归还后正常恢复", !lease.Suspended && touchable);
+}
+
+Console.WriteLine($"PromptBarTouch: {passed}/{passed + failed} passed");
+return failed == 0 ? 0 : 1;

@@ -4,6 +4,7 @@ using PgrVoice.AndroidApp.Ui;
 using PgrVoice.Following;
 using System.Text.Json;
 
+using PgrVoice.Listening;
 namespace PgrVoice.AndroidApp;
 
 public sealed partial class AppSession
@@ -30,19 +31,20 @@ public sealed partial class AppSession
     AdvanceRegionOverlay? advanceSelector;
     public bool AutoPlaybackRunning=>autoPlay.Running;
     public string AutoPlaybackPhaseName=>autoPlay.Phase.ToString();
-    bool AutoNeedsConsensus=>autoPlay.Phase==AutoPlaybackPhase.CheckingCurrent;
+    bool AutoNeedsConsensus=>autoPlay.Phase is AutoPlaybackPhase.CheckingCurrent or AutoPlaybackPhase.WaitingForGame;
     // 本次用户启动时的前台身份，仅用于切出停止；不保存、不要求选服。
     string AutoGamePackage = "";
     public void StopAutoPlayback()=>PauseAutoPlayback("自动播放已停止，请核对游戏位置后再开始。",false);
     void PauseAutoPlaybackForOverlayExit(string reason)
     {
         // 确认窗口已关闭、延迟起播尚未执行时也必须撤销，不能只检查 Running。
-        if(autoPlay.Running||autoStartConfirmation!=null||manualBranchConfirmation!=null||branchCommonWait!=null||ConfirmedBranchWaiting||SourceChoiceWaiting)PauseAutoPlayback(reason,false);
+        if(autoPlay.Running||autoStartConfirmation!=null||manualBranchConfirmation!=null||branchCommonWait!=null||ConfirmedBranchWaiting||SourceChoiceWaiting||gameCountdown!=null)PauseAutoPlayback(reason,false);
     }
     void ResetAutoConsensus(){autoPendingNode=autoPendingFrame=null;autoConsensus=0;autoLastSequence=-1;}
     void CancelAutoPlayback()
     {
         overlay.ClearBranchEntered();
+        CancelGameCountdown();
         CancelSourceChoiceWait();
         CancelConfirmedBranchWait();
         CancelManualBranchFollow();
@@ -55,15 +57,37 @@ public sealed partial class AppSession
         if(autoTimer!=null){main.RemoveCallbacks(autoTimer);autoTimer=null;}
         if(autoSilentTimer!=null){main.RemoveCallbacks(autoSilentTimer);autoSilentTimer=null;}
         autoServiceToken=0;autoTarget=null;ResetAutoConsensus();
+        ClearGameEndWait();
         if(wasRunning)GameAdvanceAccessibilityService.CancelSession();
         if(wasRunning)overlay.SetCaptureHidden(false);
         if(advanceSelector!=null){advanceSelector.Dispose();advanceSelector=null;overlay.Show();}
     }
+    /// <summary>0.4.7（K）游戏模式（自动播放 / 跟随）的播放记录。</summary>
+    void LogGame(string type,PlaybackEngine engine,string? nodeId,string reason,string option="")
+    {
+        Node? node=nodeId!=null&&engine.Pack.ById.TryGetValue(nodeId,out var n)?n:null;
+        var section=node==null?null:engine.Pack.Chapters.SelectMany(c=>c.Sections).FirstOrDefault(s=>s.Id==node.SectionId);
+        var chapter=node==null?null:engine.Pack.Chapters.FirstOrDefault(c=>c.Sections.Any(s=>s.Id==node.SectionId));
+        PlaybackLog.Write(type,"自动播放",engine.Pack,chapter?.Title??"",section?.Title??node?.SectionId??"",nodeId,reason.Replace("\n"," "),option);
+    }
+    /// <summary>0.4.7（J/M）游戏模式当前句的「待配音 / 无配音」签；有音频、非台词或仅字幕时为 null。</summary>
+    public string? GameVoiceTag=>Engine?.Current is { Kind: "line" } node&&PassesWithoutVoice(node)&&!(Engine.Pack.ResolveAudio(node) is { } f&&File.Exists(f))
+        ?PendingVoice.VoiceTag(node):null;
+    /// <summary>游戏模式无文本死角：停在缺口，且没有续接菜单、也没有配音包声明的续接。</summary>
+    public bool GameDeadEnd(PlaybackEngine? engine)=>engine is { Mode: RunMode.Gap } e&&e.ResumeMenus.Count==0&&DeclaredContinuation==null;
+    /// <summary>「反馈」：写一条玩家反馈记录（配音包、章节 + 小节、节点、时间）并提示。</summary>
+    public void GameFeedback()
+    {
+        if(Engine is not { } engine)return;
+        LogGame(PlaybackLog.Types.PlayerFeedback,engine,engine.CurrentId,"后续没有配音文本，游戏里可能还有内容");
+        Status="已记录反馈。"+UiText.ExportPlaybackLogHint;Notify();
+    }
     void PauseAutoPlayback(string reason,bool showNotice=true)
     {
-        CancelAutoPlayback();ocrEpoch++;ocrSchedule.Reset();pendingFrame.Clear();manualOcr=false;playGeneration++;
+        CancelAutoPlayback();gameOrderVisited.Clear();ocrEpoch++;ocrSchedule.Reset();pendingFrame.Clear();manualOcr=false;playGeneration++;
         audio.Stop();Engine?.PauseForBrowse();Status=reason;Notify();
         Diagnostics.Log("自动播放暂停",reason);
+        if(Engine is { } stopped)LogGame(PlaybackLog.Types.Stop,stopped,stopped.CurrentId,reason);
         if(showNotice&&overlay.CanShow)overlay.ShowAutoPlaybackPaused(reason);
     }
     void StartAutoPlayback()
@@ -241,6 +265,7 @@ public sealed partial class AppSession
     }
     void HandleAutoPlaybackObservation(PlaybackEngine engine,FollowObservation observation)
     {
+        if(autoPlay.Phase==AutoPlaybackPhase.WaitingForGame){HandleGameEndWaitObservation(engine,observation);return;}
         if(autoPlay.Phase!=AutoPlaybackPhase.CheckingCurrent||!CheckAutoPlaybackEnvironment())return;
         if(!observation.IsStable||observation.Sequence<=autoLastSequence)return;
         autoLastSequence=observation.Sequence;
@@ -267,6 +292,11 @@ public sealed partial class AppSession
         {PauseAutoPlayback(routeReason);return;}
         if(!CanAutoPlayLine(engine.Pack,node))
         {PauseAutoPlayback("当前句没有可用配音，自动播放已暂停。");return;}
+        ResumeAutoAtLocatedLine(engine,probe,node);
+    }
+    /// <summary>OCR 已唯一确认游戏当前句（开局定位或 0.4.7 终点等待）后，从这句开始自动播放。</summary>
+    void ResumeAutoAtLocatedLine(PlaybackEngine engine,PlaybackEngine probe,Node node)
+    {
         // 重定位前换代，废弃所有初始 OCR；真实引擎只在已武装播放阶段发声。
         autoPlay.Start(node.Id,SystemClock.ElapsedRealtime());
         long epoch=autoPlay.Epoch;
@@ -300,18 +330,21 @@ public sealed partial class AppSession
     static bool IsSilentPunctuation(Node node)=>node.Kind=="line"&&string.IsNullOrWhiteSpace(node.Audio)&&
         !string.IsNullOrWhiteSpace(node.Text)&&node.Text.Any(char.IsPunctuation)&&
         node.Text.All(c=>char.IsWhiteSpace(c)||char.IsPunctuation(c));
-    static bool CanAutoPlayLine(Pack pack,Node node)=>IsSilentPunctuation(node)||
+    // 0.4.7（J）：自动播放里任何没有可用音频的台词都不停（显示字幕、按字数停留后继续）；not-spoken 在游戏模式同样停留后继续。
+    static bool PassesWithoutVoice(Node node)=>PendingVoice.IsFlagged(node)||node is { Kind: "line", Archived: false, AudioStatus: "not-spoken" };
+    static bool CanAutoPlayLine(Pack pack,Node node)=>IsSilentPunctuation(node)||PassesWithoutVoice(node)||
         pack.ResolveAudio(node) is { } file&&File.Exists(file);
-    void StartAutoSilentPause(PlaybackEngine owner,Node node,long request)
+    void StartAutoSilentPause(PlaybackEngine owner,Node node,long request,int? pendingVoiceMilliseconds=null)
     {
         audio.Stop();
         if(!CheckAutoPlaybackEnvironment())return;
         long epoch=autoPlay.Epoch;
         if(owner.CurrentId!=node.Id||!AutoLinePermitted(owner)||
-            !autoPlay.BeginSilentPause(epoch,node.Id,SystemClock.ElapsedRealtime()))
+            !autoPlay.BeginSilentPause(epoch,node.Id,SystemClock.ElapsedRealtime(),pendingVoiceMilliseconds))
         {PauseAutoPlayback("当前停顿不属于已确认的播放路线，自动播放已暂停。");return;}
-        Status="标点停顿 · 稍后自动继续";Notify();
-        Diagnostics.Log("自动播放标点停顿",node.Id);
+        if(pendingVoiceMilliseconds!=null)LogGame(PendingVoice.PassType(node),owner,node.Id,node.AudioStatus??"无音频");
+        if(pendingVoiceMilliseconds!=null){Status=PendingVoice.Tag(node)+(string.IsNullOrWhiteSpace(node.Speaker)?"":node.Speaker+" · ")+UiText.PendingVoiceAuto;Notify();Diagnostics.Log(PendingVoice.IsSubtitleOnly(node)?"自动播放仅字幕":"自动播放待配音",node.Id+" "+pendingVoiceMilliseconds+"ms");}
+        else{Status="标点停顿 · 稍后自动继续";Notify();Diagnostics.Log("自动播放标点停顿",node.Id);}
         if(autoSilentTimer!=null)main.RemoveCallbacks(autoSilentTimer);
         autoSilentTimer=()=>
         {
@@ -321,7 +354,7 @@ public sealed partial class AppSession
             autoSilentTimer=null;
             AdvanceAfterAutoLine(epoch);
         };
-        main.PostDelayed(autoSilentTimer,AutoPlaybackCycle.SilentPauseMilliseconds);
+        main.PostDelayed(autoSilentTimer,pendingVoiceMilliseconds??AutoPlaybackCycle.SilentPauseMilliseconds);
     }
     void AdvanceAfterAutoLine(long epoch)
     {
@@ -336,6 +369,10 @@ public sealed partial class AppSession
                 autoTarget is { } branchTarget&&autoDisplay.RegionKey is { } branchKey&&
                 TryWaitForCommonAfterBranch(engine,menuId,branchTarget,branchKey,true))return;
             if(TryAdvanceAutoIntoBranch(engine,epoch))return;
+            // 0.4.7：未归档 end 节点（选项出口 / 小节正文末尾）不关闭自动播放，转入等待游戏画面定位。
+            if(TryBeginGameEndWait(engine,decision,epoch))return;
+            // 0.4.7 未核出口（等待确认续接）：15 秒倒计时后按顺序续接（与桌面 / 听书同一规则）。
+            if(TryBeginGameOrderCountdown(engine,decision,epoch))return;
             string nextStep=decision.Code switch
             {
                 "choice" or "branch" or "next-branch" => Settings.AutoPlayConfirmBranch ?
@@ -343,9 +380,11 @@ public sealed partial class AppSession
                     "此处无法使用所设默认分支，对应选项、正文或条件需要确认；请在游戏中继续，并手动核对配音路线。" : Settings.BranchAutoFollow ?
                     "请在游戏中手动继续，出现选项后在游戏和配音中选择同一分支；支线内请用点按跟随或手动播放。" :
                     "分支期间配音保持暂停；此处没有可靠的共同续接句，请自行继续游戏，到共同线后手动定位再恢复。",
-                "end" => "本段已播放完毕。请手动继续游戏，确认新的共同剧情起点后再开启。",
+                "end" => GameEndWaitPolicy.FallbackHint+"；定位到下一句后自动继续。",
                 _ => "请在游戏中手动继续，并通过台词页或 OCR 定位核对新的起点。"
             };
+            // 0.4.7（L）游戏模式的无文本死角：只显示提示与「反馈」并等待游戏，不跳小节（游戏画面决定实际位置）。
+            if(GameDeadEnd(engine)){PauseAutoPlayback(ListeningText.DeadEndHint+"。\n本次尚未点击游戏下一句；请在游戏中继续，可在台词页点「反馈」。");return;}
             PauseAutoPlayback(decision.Reason+"\n本次尚未点击游戏下一句。\n"+nextStep);return;
         }
         var next=decision.Next;

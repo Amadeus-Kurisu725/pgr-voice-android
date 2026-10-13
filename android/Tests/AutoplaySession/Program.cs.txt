@@ -263,12 +263,17 @@ Test("纯标点已有配音时仍等待真实音频自然结束", () => {
     Check(s.PlayedNodes.SequenceEqual(["a"]) && s.GestureRequests == 0, "跳过已有配音");
     s.CompleteAudio(); Check(s.GestureRequests == 1, "真实配音结束未推进");
 });
-Test("带文字数字符号空白或动作说明的无音频句仍暂停，not-spoken不作为放行依据", () => {
+// 0.4.7（J）：自动播放里没有可用音频的台词都不停，not-spoken 也一样——显示字幕，按字数停留（每字 0.25 秒、至少 2 秒）后点击下一句。
+// 原 0.3.34 预期「带文字 / 数字 / 符号 / 空白或动作说明的无音频句仍暂停，not-spoken 不作为放行依据」已翻转。
+Test("0.4.7：not-spoken 无音频句（含文字、数字、符号、动作说明、空白）不暂停自动播放——按字数停留后点击下一句", () => {
     foreach (string text in new[] { "……等等。", "123……", "a...", "（沉默）", "★", "😀", "", " \t\r\n" })
     {
         var s = Session(currentAudio: false); s.Engine!.Current!.Text = text; s.Engine.Current.AudioStatus = "not-spoken";
-        s.BeginFromOverlay(); s.Window.Latest.Confirmed(); s.AdvanceClock(180); Silent(s);
-        Check(s.Status.Contains("没有可用配音"), "非纯标点被放行：" + text);
+        s.BeginFromOverlay(); s.Window.Latest.Confirmed(); s.AdvanceClock(180);
+        Check(s.AutoPlaybackRunning && !s.Status.Contains("没有可用配音") && s.PlayedNodes.Count == 0 && s.GestureRequests == 0, "not-spoken 被暂停或提前点击：" + text + " " + s.Status);
+        int dwell = PgrVoice.Listening.PendingVoice.DwellMilliseconds(text);
+        s.AdvanceClock(dwell + 50);
+        Check(s.AutoPlaybackRunning && s.GestureRequests == 1, "停留后没有点击下一句：" + text + " " + s.Status);
     }
 });
 Test("纯标点引用的音频文件丢失时仍暂停，包括下一句", () => {

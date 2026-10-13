@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **版本** | 0.3.34（versionCode 38） |
+| **版本** | 0.4.22（versionCode 62） |
 | **系统要求** | Android 10（API 29）及以上，**仅 64 位**（arm64-v8a / x86_64） |
 | **包名** | `cn.pgrvoice.player` |
 | **技术栈** | .NET 10 for Android（C#）、Media3 ExoPlayer、ONNX Runtime、ML Kit |
@@ -40,7 +40,7 @@
 - **独立听书（含重选分支）** —— 选过一条路线后仍可改选，只撤销本处及本小节之后的选择，前序与书签保留。
 - **内置剧情资料查询** —— 138 章、6142 小节的正文、选项与汇合查询。**只读**：不定位、不播放、不写进度。
 
-> ⚠️ **注意**：内置资料与游戏原声目录属于**游戏衍生数据**，**不随本仓库分发**。代码对资源缺失有完整降级处理（`BundledStoryReference`、`BundledRouteRepairs`、`SourceChoicePolicy` 均能优雅降级），缺失时相关增强功能不可用，其余功能不受影响。
+> ⚠️ **注意**：内置资料、游戏原声目录、**角色头像（`Assets/avatars/`）与章节封面（`Assets/covers/`）**属于**游戏衍生数据**，**不随本仓库分发**。代码对资源缺失有完整降级处理（`BundledStoryReference`、`BundledRouteRepairs`、`SourceChoicePolicy`、`BundledAvatars`、`BundledCovers` 均能优雅降级），缺失时相关增强功能不可用（头像与封面回退为你自己导入的图片或字标），其余功能不受影响。
 
 ## 构建
 
@@ -75,7 +75,7 @@ android/                     安卓应用工程（PgrVoice.Android.csproj）
   Ocr/                       本地检测、裁切、识别与 ML Kit 对照
   Contracts/                 平台无关接口（音频输出 / 章节存储 / 屏幕输入）
   Diagnostics/               诊断 Activity（仅 Debug 构建导出）
-  Assets/                    随包 OCR 模型、法律文本、UI 资源
+  Assets/                    随包 OCR 模型、法律文本、UI 资源（游戏头像 / 封面不入库）
   Tests/                     各模块回归工程
   docs/                      使用说明、界面设计、测试范围与验收记录
 core/                        与 Windows 版共用的核心（PgrVoice.Core.csproj）
@@ -102,7 +102,7 @@ docs/preview/                README 用的界面截图
 - ML Kit 会把「文明」识别为「女明」，因此没有用对照结果降低自动推进的门槛。
 - 性能数据来自模拟器整图识别样本（Paddle 约 247–375 ms、ML Kit 约 329–587 ms），**不能作为手机性能、持续耗电或最低配置证明**。
 - 还没做真实游戏并行运行、真实手机声音混合、内外屏切换或 30 分钟持续测试。日常发热请自行判断，可手动切到低功耗或手动模式。
-- 本仓库只包含应用源码。作者本机的构建 / 签名 / 真机观测脚本未包含在内（构建方式见上文）。
+- 本仓库包含应用源码与可独立运行的回归夹具。作者本机的发布构建与签名脚本（`android/tools/`）未包含在内；`android/Tests/` 下的真机夹具脚本保留了完整方法，但里面的 SDK / JDK / ADB 路径是示例值，需按你自己的环境修改（构建方式见上文）。
 
 ## 第三方组件与声明
 

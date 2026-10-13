@@ -1,0 +1,28 @@
+using PgrVoice.AndroidApp;
+
+// 03-B2 snippet rules (SPEC 片段规则); width is measured in characters (1 per char) for determinism.
+int passed = 0, failed = 0;
+void Check(string name, string actual, string expected)
+{
+    if (actual == expected) { passed++; Console.WriteLine("PASS " + name); }
+    else { failed++; Console.WriteLine($"FAIL {name}\n  expected: {expected}\n  actual:   {actual}"); }
+}
+float M(string s) => s.Length;
+const string Long = "这片区域的干扰太强了，雾里的信号越来越弱了，指挥官，跟紧我，不要掉队。";
+Check("anchor keeps up to 4 chars after punctuation, fills to width",
+    SearchSnippet.Build("露西亚", Long, "露西亚 信号", M, 20).Display, "露西亚：…雾里的信号越来越弱了，指挥官…");
+Check("short line shown whole",
+    SearchSnippet.Build("露西亚", "别管信号了，先撤出浓雾。", "露西亚 信号", M, 20).Display, "露西亚：别管信号了，先撤出浓雾。");
+const string Tail = "等这边的干扰全部解除之后，我会第一时间去切断那座信号塔。";
+Check("near the end: window moves back from the end",
+    SearchSnippet.Build("露西亚", Tail, "信号", M, 20).Display, "露西亚：…我会第一时间去切断那座信号塔。");
+const string Two = "露西亚握紧通讯器，耳机里只剩下一阵又一阵断断续续的信号杂音。";
+var two = SearchSnippet.Build("", Two, "露西亚 信号", M, 22);
+Check("narrator prefix and two distant keywords", two.Display, "旁白：露西亚握紧通讯器，…断续续的信号杂音。");
+Check("highlights cover both keywords", string.Join(",", two.Highlights.Select(h => two.Display[h.Start..h.End])), "露西亚,信号");
+var cut = SearchSnippet.Build("露西亚", Long, "信号", M, 20);
+Check("tail fade on last two visible chars", cut.Fade is { } f ? cut.Display[f.Start..f.End] : "none", "挥官");
+Check("speaker keyword highlighted", string.Join(",", SearchSnippet.Build("露西亚", "别管了。", "露西亚", M, 40).Highlights.Select(h => h.Start + "-" + h.End)), "0-3");
+Check("normalisation spans punctuation", string.Join(",", SearchSnippet.Hits("信，号来了", SearchSnippet.Terms("信号")).Select(h => h.Start + "-" + h.End)), "0-3");
+Console.WriteLine($"SearchSnippet: {passed}/{passed + failed} passed");
+return failed == 0 ? 0 : 1;

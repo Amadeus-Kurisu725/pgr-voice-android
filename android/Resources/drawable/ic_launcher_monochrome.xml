@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 13+ themed icon layer: raven rising above the Red Tide waveform (single colour, system tints it). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFFFF" android:fillType="evenOdd"
+        android:pathData="M33.46,72.62 C32.42,57.02 33.46,44.54 39.44,36.74 C44.38,30.76 51.66,27.64 57.38,27.38 L74.54,31.54 L60.50,40.38 C55.30,44.54 53.22,52.86 53.74,72.62 Z M45.94,36.48 L48.54,34.68 L51.14,36.48 L48.54,38.28 Z" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M32.2,78 L37.6,78 L40.7,73 L43.9,82 L47.0,71 L50.1,84 L53.2,72 L56.3,83 L59.5,74 L62.6,80 L65.7,77 L75.8,77 L75.8,81 L66.5,81 L63.4,84 L59.5,79 L56.3,88 L53.2,77 L50.1,88 L47.0,76 L43.9,86 L40.7,78 L38.4,82 L32.2,82 Z" />
+</vector>

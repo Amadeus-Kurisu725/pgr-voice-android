@@ -25,11 +25,16 @@ public sealed class AppSettings
     // 只覆盖已启动的自动播放分支；升级不自动开启，也不改变手动/点按跟随的偏好。
     public bool AutoPlayDefaultBranchEnabled { get; set; }
     public int DefaultBranchOption { get; set; } = 1;
+    // 0.4.7「分支自动选择」：听书 / 自动播放停在待选支线、未核续接或无文本死角时，15 秒倒计时后按默认第一 / 第二个选项处理；关闭则等待。
+    public bool BranchAutoSelect { get; set; } = true;
     // 旧版持续 OCR 跟随设置，仅兼容读取历史设置，不再影响定位。
     public bool LowPower { get; set; }
     public bool VoicePriority { get; set; }
     public float Volume { get; set; } = .85f;
     public Dictionary<string, int> SpeakerVolumes { get; set; } = new(StringComparer.Ordinal);
+    // 游戏有原配的台词静音配音包（只在边玩边听；听书照常）。DubPacks 是用户按章选了“用配音包”的章节。
+    public bool NativeVoiceMute { get; set; }
+    public HashSet<string> NativeVoiceDubPacks { get; set; } = new(StringComparer.Ordinal);
     public OcrEngineKind OcrEngine { get; set; } = OcrEngineKind.Paddle;
     public bool OcrFullScreen { get; set; } = true;
     public Dictionary<string, ScreenRegion> Regions { get; set; } = new();
@@ -41,6 +46,7 @@ public sealed class AppSettings
     {
         ImportedArchives ??= new();
         SpeakerVolumes ??= new(StringComparer.Ordinal);
+        NativeVoiceDubPacks = new(NativeVoiceDubPacks ?? new(), StringComparer.Ordinal);
         Regions ??= new();
         DisplayRegions ??= new();
         AdvanceTargets ??= new();
@@ -52,6 +58,23 @@ public sealed class AppSettings
     public string? DebugAutoPlayPackage { get; set; }
 #endif
     public bool OnboardingShown { get; set; }
+    // 仅控制界面装饰：用户自备的角色背景立绘（本地文件，未自带任何素材）。
+    public bool ShowStandee { get; set; } = true;
+    // 剧情页播放托盘收起（仅显示；竖屏托盘与横屏托盘列 / 细轨共用；默认展开，切换即保存）。
+    public bool StoryTrayCollapsed { get; set; }
+    // 听书页托盘收起（06-B；竖屏托盘与横屏列 / 细轨共用；默认展开）。
+    public bool ListeningTrayCollapsed { get; set; }
+    // 定位页托盘收起（07-B；默认展开）。
+    public bool LocateTrayCollapsed { get; set; }
+    // 分支 / 历史 / 设置页托盘收起（08–10；各自独立记忆，默认收起）。
+    public bool BranchTrayCollapsed { get; set; } = true;
+    public bool HistoryTrayCollapsed { get; set; } = true;
+    public bool SettingsTrayCollapsed { get; set; } = true;
+    // 08-B2 路线图「展开全部」（默认收起为紧凑窗口）。
+    public bool BranchRouteExpanded { get; set; }
+    // 09-B 历史页段页签（0 书签 / 1 最近分支 / 2 台词履历，默认台词履历）；10-B 设置页段页签（默认第一个）。
+    public int HistoryTab { get; set; } = 2;
+    public int SettingsTab { get; set; }
     public bool HasRegion(string? displayKey) => displayKey != null && DisplayRegions.ContainsKey(displayKey);
     public ScreenRegion RegionFor(string? displayKey) =>
         displayKey != null && DisplayRegions.TryGetValue(displayKey, out var region) ? region.Clamp() : new();

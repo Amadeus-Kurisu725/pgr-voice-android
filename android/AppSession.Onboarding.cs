@@ -36,7 +36,7 @@ public sealed partial class AppSession
         {
             LoadPack(selected.Pack.Id);
             // 只改变目录浏览到所选大章，不把试听台词提交为游戏当前位置。
-            SectionId=selected.Chapter.Sections.First().Id;
+            SectionId=SectionDisplay.FirstListed(selected.Chapter.Sections)!.Id;
         }
         state.Complete();Onboarding.Save();
     }

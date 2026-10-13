@@ -56,7 +56,8 @@ public sealed class ListeningForegroundService : Service
         var power = (PowerManager)GetSystemService(PowerService)!;
         wakeLock = power.NewWakeLock(WakeLockFlags.Partial, "PgrVoice:Listening");
         wakeLock!.SetReferenceCounted(false);
-        idleStop = () => { if (!Session.IsPlaying) StopSelf(); };
+        // 倒计时暂停仍有可继续的媒体控制；不能按普通空闲退出并清掉剩余秒数。
+        idleStop = () => { if (!Session.IsPlaying && !Session.PlayTogglesCountdown) StopSelf(); };
     }
     public override StartCommandResult OnStartCommand(Intent? intent, StartCommandFlags flags, int startId)
     {
@@ -78,8 +79,10 @@ public sealed class ListeningForegroundService : Service
         {
             switch (action.Replace(Prefix, "", StringComparison.Ordinal))
             {
-                case "PLAY": Session.Play(); break;
-                case "PAUSE": Session.Pause(); break;
+                // 0.4.8：通知栏 / 锁屏 / 耳机键与主播放按钮、倒计时卡「暂停 / 继续」同一状态同一操作（见 ListeningSession.MediaPlay / MediaPause / MediaToggle）。
+                case "PLAY": Session.MediaPlay(); break;
+                case "PAUSE": Session.MediaPause(); break;
+                case "TOGGLE": Session.MediaToggle(); break;
                 case "NEXT": Session.Next(); break;
                 case "PREVIOUS": Session.Previous(); break;
                 case "STOP": Session.Stop(); StopSelf(); break;
@@ -102,13 +105,15 @@ public sealed class ListeningForegroundService : Service
         using var state = new PlaybackState.Builder()
             .SetActions(PlaybackState.ActionPlay | PlaybackState.ActionPause | PlaybackState.ActionPlayPause |
                 PlaybackState.ActionSkipToNext | PlaybackState.ActionSkipToPrevious | PlaybackState.ActionStop | PlaybackState.ActionSeekTo)!
-            .SetState(playing ? PlaybackStateCode.Playing : PlaybackStateCode.Paused,
+            // 倒计时进行中按「播放中」报告，耳机 / 锁屏键发来的是「暂停」；已暂停按「已暂停」报告，发来的是「播放」=「继续」。
+            .SetState(session.PlayShowsPauseIcon ? PlaybackStateCode.Playing : PlaybackStateCode.Paused,
                 session.IsPreviewing ? 0 : session.PositionMilliseconds, session.Speed, SystemClock.ElapsedRealtime())!.Build();
         mediaSession.SetPlaybackState(state);
-        if (playing) { if (wakeLock?.IsHeld != true) wakeLock?.Acquire(); }
+        // 倒计时运行也需要完成后台计时；暂停后立即释放，保留媒体会话供继续。
+        if (session.PlayShowsPauseIcon) { if (wakeLock?.IsHeld != true) wakeLock?.Acquire(); }
         else if (wakeLock?.IsHeld == true) wakeLock.Release();
         handler?.RemoveCallbacks(idleStop!);
-        if (!playing && idleStop != null) handler?.PostDelayed(idleStop, 5 * 60_000);
+        if (!playing && !session.PlayTogglesCountdown && idleStop != null) handler?.PostDelayed(idleStop, 5 * 60_000);
         ((NotificationManager)GetSystemService(NotificationService)!).Notify(NotificationId, BuildNotification());
     }
     PendingIntent Command(string action, int id) => PendingIntent.GetService(this, id,
@@ -121,17 +126,26 @@ public sealed class ListeningForegroundService : Service
         intent.PutExtra("page", "Listening");
         var open = PendingIntent.GetActivity(this, 3102, intent, PendingIntentFlags.Immutable | PendingIntentFlags.UpdateCurrent);
         var style = new Notification.MediaStyle().SetMediaSession(mediaSession!.SessionToken)!.SetShowActionsInCompactView(0, 1, 2);
+        // 0.4.8 设计稿 07：倒计时到点自动选择后，通知标题改为「已自动选择：xxx」，正文为章节 · 小节 · 说话人：当前句。
+        string? selected = session.AutoNotice is { } notice && session.AutoNoticeEnglish == "AUTO · SELECTED" ? notice : null;
+        var shown = session.PreviewNode ?? session.Current;
+        string body = session.IsPreviewing ? "只试听当前一句 · 结束后停住"
+            : selected != null ? session.PositionText + (shown == null ? "" : " · " + (string.IsNullOrWhiteSpace(shown.Speaker) ? "" : shown.Speaker + "：") + shown.Text)
+            : session.Choices.Count > 0 ? (session.CountdownRemaining > 0
+                ? (session.CountdownPaused ? "待选支线 · 倒计时已暂停 · 打开听书页选择" : $"待选支线 · {session.CountdownRemaining} 秒后自动选择 · 也可打开听书页选择")
+                : "请打开听书页选择支线")
+            : session.PositionText;
         var builder = new Notification.Builder(this, Channel)
             .SetSmallIcon(Android.Resource.Drawable.IcMediaPlay)
-            .SetContentTitle(session.Chapter?.Title ?? "剧情听书")
-            .SetContentText(session.IsPreviewing ? "只试听当前一句 · 结束后停住" : session.Choices.Count > 0 ? "请打开听书页选择支线" : session.PositionText)
+            .SetContentTitle(selected ?? session.Chapter?.Title ?? "剧情听书")
+            .SetContentText(body)
             .SetSubText(session.Status)
             .SetVisibility(NotificationVisibility.Public)
             .SetContentIntent(open).SetOnlyAlertOnce(true).SetOngoing(session.IsPlaying)
             .SetStyle(style);
         builder.AddAction(new Notification.Action.Builder(Icon.CreateWithResource(this, Android.Resource.Drawable.IcMediaPrevious), "上一句", Command("PREVIOUS", 3111)).Build());
-        builder.AddAction(new Notification.Action.Builder(Icon.CreateWithResource(this, session.IsPlaying ? Android.Resource.Drawable.IcMediaPause : Android.Resource.Drawable.IcMediaPlay),
-            session.IsPlaying ? "暂停" : "继续", Command(session.IsPlaying ? "PAUSE" : "PLAY", 3112)).Build());
+        builder.AddAction(new Notification.Action.Builder(Icon.CreateWithResource(this, session.PlayShowsPauseIcon ? Android.Resource.Drawable.IcMediaPause : Android.Resource.Drawable.IcMediaPlay),
+            session.PlayTogglesCountdown || session.IsPlaying ? session.PlayCaption : "继续", Command("TOGGLE", 3112)).Build());
         builder.AddAction(new Notification.Action.Builder(Icon.CreateWithResource(this, Android.Resource.Drawable.IcMediaNext), "下一句", Command("NEXT", 3113)).Build());
         builder.AddAction(new Notification.Action.Builder(Icon.CreateWithResource(this, Android.Resource.Drawable.IcMenuCloseClearCancel), "停止", Command("STOP", 3114)).Build());
         return builder.Build();

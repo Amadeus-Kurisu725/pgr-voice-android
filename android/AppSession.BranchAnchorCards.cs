@@ -7,7 +7,7 @@ public sealed partial class AppSession
         var offer = BranchAnchorPolicy.Create(confirmation.Engine, maximumLinesPerOption: 2);
         if (offer.Cards.Count == 0) return false;
         overlay.ShowManualBranchSelection(BrowseSectionTitle(confirmation.Engine, confirmation.Menu.SectionId),
-            offer.Cards.Select(c => c.Speaker + "：" + c.Text + (c.IsAmbiguous ? "\n同文：请按选项继续核对" : "")).ToArray(),
+            offer.Cards.Select(c => SpeakerLabel(c.Speaker) + "：" + c.Text + (c.IsAmbiguous ? "\n同文：请按选项继续核对" : "")).ToArray(),
             index => main.PostDelayed(() => Post(() =>
             {
                 if (!ReferenceEquals(manualBranchConfirmation, confirmation) || !ManualBranchEnvironmentValid(confirmation) || index < 0 || index >= offer.Cards.Count) return;

@@ -1,33 +1,41 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+  <!-- Platform theme: tokens mirror Ui/PgrTheme.cs (palette C1 冷灰白). -->
   <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
     <item name="android:fontFamily">sans-serif</item>
-    <item name="android:colorAccent">#E94D5A</item>
-    <item name="android:colorControlNormal">#929DAA</item>
-    <item name="android:colorControlActivated">#E94D5A</item>
-    <item name="android:colorControlHighlight">#33E94D5A</item>
-    <item name="android:textColorPrimary">#F2F3F5</item>
-    <item name="android:textColorSecondary">#929DAA</item>
-    <item name="android:textColorHint">#929DAA</item>
-    <item name="android:colorBackground">#101216</item>
-    <item name="android:colorBackgroundFloating">#22272F</item>
-    <item name="android:windowLightNavigationBar">false</item>
-    <item name="android:windowLightStatusBar">false</item>
-    <item name="android:statusBarColor">#101216</item>
-    <item name="android:navigationBarColor">#101216</item>
-    <item name="android:windowBackground">#101216</item>
+    <item name="android:colorPrimary">@color/pgr_background</item>
+    <item name="android:colorPrimaryDark">@color/pgr_void</item>
+    <item name="android:colorAccent">@color/pgr_red</item>
+    <item name="android:colorControlNormal">@color/pgr_text_muted</item>
+    <item name="android:colorControlActivated">@color/pgr_red</item>
+    <item name="android:colorControlHighlight">@color/pgr_red_ripple</item>
+    <item name="android:textColorPrimary">@color/pgr_text</item>
+    <item name="android:textColorSecondary">@color/pgr_text_secondary</item>
+    <item name="android:textColorHint">@color/pgr_text_muted</item>
+    <item name="android:textColorHighlight">@color/pgr_text_highlight</item>
+    <item name="android:colorBackground">@color/pgr_void</item>
+    <item name="android:colorBackgroundFloating">@color/pgr_background</item>
+    <item name="android:windowLightNavigationBar">true</item>
+    <item name="android:windowLightStatusBar">true</item>
+    <item name="android:statusBarColor">@color/pgr_void</item>
+    <item name="android:navigationBarColor">@color/pgr_void</item>
+    <item name="android:windowBackground">@color/pgr_void</item>
     <item name="android:windowActionModeOverlay">true</item>
     <item name="android:alertDialogTheme">@style/PgrDialogTheme</item>
   </style>
-  <style name="PgrDialogTheme" parent="android:style/Theme.Material.Dialog.Alert">
+  <style name="PgrDialogTheme" parent="android:style/Theme.Material.Light.Dialog.Alert">
     <item name="android:fontFamily">sans-serif</item>
-    <item name="android:colorAccent">#E94D5A</item>
-    <item name="android:colorControlActivated">#E94D5A</item>
-    <item name="android:textColorPrimary">#F2F3F5</item>
-    <item name="android:textColorSecondary">#929DAA</item>
-    <item name="android:textColorHint">#929DAA</item>
-    <item name="android:colorBackground">#22272F</item>
-    <item name="android:colorBackgroundFloating">#22272F</item>
-    <item name="android:windowBackground">#22272F</item>
+    <item name="android:colorAccent">@color/pgr_red</item>
+    <item name="android:colorControlNormal">@color/pgr_text_muted</item>
+    <item name="android:colorControlActivated">@color/pgr_red</item>
+    <item name="android:colorControlHighlight">@color/pgr_red_ripple</item>
+    <item name="android:textColorPrimary">@color/pgr_text</item>
+    <item name="android:textColorSecondary">@color/pgr_text_secondary</item>
+    <item name="android:textColorHint">@color/pgr_text_muted</item>
+    <item name="android:textColorAlertDialogListItem">@color/pgr_text</item>
+    <item name="android:colorBackground">@color/pgr_background</item>
+    <item name="android:colorBackgroundFloating">@color/pgr_background</item>
+    <item name="android:windowBackground">@color/pgr_background</item>
+    <item name="android:backgroundDimAmount">0.45</item>
   </style>
 </resources>

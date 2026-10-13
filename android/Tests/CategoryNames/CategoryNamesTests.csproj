@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 分类面板 B 版：名称取值（ChapterCatalog.Categories + 英文表）与英文适配规则（收字距 → 降字号 ≥7sp → 换行，不截断）。 -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../core/PgrVoice.Core.csproj" />
+    <Compile Include="Program.cs.txt" />
+    <Compile Include="../../CategoryNames.cs" Link="CategoryNames.cs" />
+  </ItemGroup>
+</Project>

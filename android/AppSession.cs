@@ -87,6 +87,7 @@ public sealed partial class AppSession
         Packages=new AndroidChapterStorage(Path.Combine(root,"chapters")); Progress=new(Path.Combine(root,"progress")); Progress.Load();
         Screen=new AndroidScreenInput(context);
         Diagnostics=new(Path.Combine(root,"diagnostics"));
+        PgrVoice.Listening.PlaybackLog.Configure(Path.Combine(root,"diagnostics","播放记录.csv"));
         _=Task.Run(()=>{try{Packages.CleanAbandonedImports();}catch(Exception ex){Diagnostics.Log("导入清理",ex.Message);}});
         CoreDiagnostics.Message+=(kind,text)=>Diagnostics.Log(kind,text);
         ocr=new(context); audio=new AndroidAudioPlayer(context); overlay=new(context);
@@ -95,10 +96,13 @@ public sealed partial class AppSession
         overlay.CompactButtonsChanged+=SetCompactButtonsVisible;
         overlay.CompactControlsChanged+=SetCompactControlsVisible;
         Listening=new(context,Packages,PrepareListening,Diagnostics,
-            node=>SpeakerVolume.Apply(Settings.Volume,Settings.SpeakerVolumes,node?.Speaker));
+            node=>SpeakerVolume.Apply(Settings.Volume,Settings.SpeakerVolumes,node?.Speaker),
+            ()=>Settings.DefaultBranchOption,
+            ()=>Settings.BranchAutoSelect);
         audio.PlaybackCompleted+=ticket=>Post(()=>OnAutoAudioCompleted(ticket));
         GameAdvanceAccessibilityService.SessionInvalidated+=message=>Post(CaptureFollowSessionInvalidation(message));
         overlay.Command+=OnOverlayCommand;
+        WirePromptBars(); // 0.4.8 界面：顶边融合条（AppSession.PromptBars.cs）
         overlay.CaptureInteraction+=message=>Diagnostics.Log("定位取消触摸",message);
         overlay.CaptureCancelRequested+=generation=>Post(()=>
         {
@@ -127,7 +131,7 @@ public sealed partial class AppSession
         if(Looper.MyLooper()==Looper.MainLooper) Guard(action); else main.Post(()=>Guard(action));
     }
     void Guard(Action action){try{action();}catch(Exception ex){ReportError(ex.Message);}}
-    void Notify(){Changed?.Invoke();overlay.UpdateClickFollow(ClickFollowRunning||BranchFollowRunning);overlay.UpdateCurrentLine(Engine?.Current?.Speaker??"",OverlayCurrentLineText());overlay.UpdateStatus(Status,Engine?.Mode==RunMode.Paused,autoPlay.Running);RefreshOverlayBrowseIfNeeded();VoiceForegroundService.UpdateNotification(Status,notificationPage);}
+    void Notify(){Changed?.Invoke();overlay.UpdateClickFollow(ClickFollowRunning||BranchFollowRunning);overlay.SetNativeVoice(IsNativeVoiceLine(Engine,Engine?.Current));overlay.UpdateCurrentLine(GameEndWaiting!=null?"等待游戏画面定位":Engine?.Current?.Speaker??"",OverlayCurrentLineText());overlay.UpdateStatus(StatusLine,Engine?.Mode==RunMode.Paused,autoPlay.Running);RefreshOverlayBrowseIfNeeded();RefreshPromptBars();VoiceForegroundService.UpdateNotification(StatusLine,notificationPage);}
     public void SetCompactButtonsVisible(bool enabled)
     {
         Settings.ShowCompactButtons=enabled;overlay.SetCompactButtonsVisible(enabled);SaveSettings();ContentChanged?.Invoke();Notify();
@@ -170,7 +174,7 @@ public sealed partial class AppSession
     }
     public void ApplyAudioSettings()
     {
-        audio.SetVolume(SpeakerVolume.Apply(Settings.Volume,Settings.SpeakerVolumes,playingSpeaker));
+        audio.SetVolume(playingNative?0:SpeakerVolume.Apply(Settings.Volume,Settings.SpeakerVolumes,playingSpeaker));
         audio.Strategy=Settings.VoicePriority?AudioStrategy.VoicePriority:AudioStrategy.Simultaneous;
         Listening.RefreshVolume();
         SaveSettings();
@@ -188,12 +192,13 @@ public sealed partial class AppSession
         if(Engine!=null){SaveProgress();saveQueue.Flush();}
         var next=new PlaybackEngine(Packages.Load(id));
         Progress.TryRestore(next); Engine=next;
-        SectionId=next.Current?.SectionId??next.Pack.Chapters.SelectMany(c=>c.Sections).First().Id;
+        SectionId=next.Current?.SectionId??SectionDisplay.FirstListed(next.Pack.Chapters.SelectMany(c=>c.Sections))!.Id;
         next.PlayRequested+=node=>PlayNode(next,node);
         next.StopRequested+=()=>{if(ReferenceEquals(Engine,next)){playGeneration++;audio.Stop();}};
         next.Changed+=()=>{if(!ReferenceEquals(Engine,next))return;SaveProgress();Notify();};
         Settings.LastPackId=id;SaveSettings();
         Status=next.Current==null?"请选择与游戏画面一致的台词。":"已恢复进度，确认位置后再开始。";
+        if(next.Pack.BundledCorrectionNotice.Length>0)Status=next.Pack.BundledCorrectionNotice+"。"+Status;
         if(Progress.LastError.Length>0)Status=Progress.LastError;
         ContentChanged?.Invoke();Notify();
     }
@@ -241,7 +246,10 @@ public sealed partial class AppSession
     {
         if(Listening.IsPlaying)Listening.Pause();
         if(Engine==null){Status="请先导入并打开一个章节。";Notify();return;}
+        // 现稿续接：未核正文按单句定位播放时，导航器的“下一句”会回到所属菜单；先记下现稿写的下一处，推进后改为续接。
+        var singleLineDraft=DraftAfterSingleLine(Engine);string? beforeId=Engine.CurrentId;string? beforePending=Engine.ExportNavigation().Current.PendingMenu;
         Invalidate();action(Engine);
+        if(!FollowDraftAfterSingleLine(Engine,singleLineDraft,beforeId,beforePending)&&Engine.Mode is RunMode.Gap or RunMode.Choice)TryFollowDraftContinuation(Engine);
         if(Engine.Current!=null)SectionId=Engine.Current.SectionId;
         if(Engine.Mode==RunMode.Original)Status="游戏原声：配音已停止、位置已冻结；选择当前台词后续接。";
         else if(Engine.Mode==RunMode.Paused)Status="已暂停。核对游戏位置后，点确认位置继续。";
@@ -309,6 +317,8 @@ public sealed partial class AppSession
         Settings.DisplayRegions[selection.Display.RegionKey!]=region.Clamp();SaveSettings();Invalidate();lastMask=null;stability.Reset();
         Status=Settings.OcrFullScreen?"字幕框已保存；当前仍为全画面定位，可在定位范围中切换为框选区域。":"当前屏幕的字幕区域已保存，可重新 OCR 定位。";Notify();
     }
+    /// <summary>SPEC C.5: read-only top hint on the overlay layer; false = overlays unavailable (caller falls back to Toast).</summary>
+    public bool ShowTopHint(string message) => overlay.ShowTopHint(message);
     public void ShowOverlay(){if(Listening.IsPlaying)Listening.Pause();VoiceForegroundService.EnsureStarted(context);overlay.Show();}
     public void HideOverlay(){if(ClickFollowRunning||BranchFollowRunning)StopClickFollow("悬浮控制已隐藏，点按跟随已停止。");else branchResumeIntent=null;PauseAutoPlaybackForOverlayExit("悬浮控制已隐藏，自动播放已暂停。");overlay.Hide();}
     public void Stop(){Listening.Stop();StopGame();}
@@ -329,10 +339,16 @@ public sealed partial class AppSession
         {
             switch(command)
             {
-                case OverlayCommand.Next:ManualOverlayStep(e=>e.Next(true));break;
+                case OverlayCommand.Next:
+                    // 游戏倒计时中：只有「下一句」真能挪动位置时才结束倒计时；挪不动则保持倒计时。
+                    if(gameCountdown!=null){if(TryOverlayNextDuringGameCountdown())break;Command(e=>e.Next(true));break;}
+                    ManualOverlayStep(e=>e.Next(true));break;
                 case OverlayCommand.Previous:ManualOverlayStep(e=>e.Previous());break;
                 case OverlayCommand.Replay:ManualOverlayStep(e=>e.Replay());break;
-                case OverlayCommand.Pause:if(Engine?.Mode==RunMode.Paused)ConfirmCurrent();else Command(e=>e.PauseForBrowse());break;
+                case OverlayCommand.Pause:
+                    // 游戏倒计时中 / 已暂停：与卡片「暂停 / 继续」相同，冻结秒数，不 CancelGameCountdown。
+                    if(gameCountdown is {Waiting:false,Finished:false}){ToggleGameCountdownPause();break;}
+                    if(Engine?.Mode==RunMode.Paused)ConfirmCurrent();else Command(e=>e.PauseForBrowse());break;
                 case OverlayCommand.Original:Command(e=>e.EnterOriginal());break;
                 case OverlayCommand.Ocr:if(Screen.CaptureActive)RequestOcr(true);else OpenApp("Capture");break;
                 case OverlayCommand.Hide:HideOverlay();break;
@@ -423,7 +439,7 @@ public sealed partial class AppSession
             manualOcr=true; manualOcrOverlay=frameRequest.OverlayResult;
         }
         if(autoPlay.Running&&!CheckAutoPlaybackEnvironment())return;
-        if(autoPlay.Running&&autoPlay.Phase!=AutoPlaybackPhase.CheckingCurrent)return;
+        if(autoPlay.Running&&autoPlay.Phase is not (AutoPlaybackPhase.CheckingCurrent or AutoPlaybackPhase.WaitingForGame))return;
         // 自动播放由人工核对起点；OCR 仅服务主动定位，不持续识别下一句。
         if(!autoPlay.Running&&!manualOcr)return;
         if(Engine==null)return;

@@ -25,13 +25,13 @@ public sealed partial class OverlayController
         int height = Math.Min(ReadDp(Math.Max(76, 14 * fontScale * 4 + 12)), safe.Bottom - safe.Top);
         var body = new LinearLayout(context) { Orientation = Orientation.Horizontal };
         body.SetPadding(ReadDp(8), ReadDp(4), ReadDp(4), ReadDp(4));
-        body.SetBackgroundColor(PgrTheme.Raised);
+        body.Background = PgrTheme.Plate(context, PgrTheme.GlassStrong, PgrTheme.GlassLine, PgrTheme.CutSmall, Corners.BottomRight, PgrTheme.Steel, AccentEdge.Left);
         var text = new TextView(context) { Text = message, TextSize = 14, Gravity = GravityFlags.CenterVertical };
         text.SetTextColor(PgrTheme.Foreground); text.SetMaxLines(4);
         text.Ellipsize = Android.Text.TextUtils.TruncateAt.End;
         body.AddView(text, new LinearLayout.LayoutParams(0, -1, 1));
         var button = new Button(context) { Text = "手动续接", TextSize = 13 };
-        button.SetAllCaps(false); button.SetTextColor(PgrTheme.Cyan); button.SetMaxLines(2);
+        PgrTheme.StyleOverlayButton(button, PgrTheme.OverlayTone.Glass); button.SetMaxLines(2);
         button.SetMinWidth(0); button.SetMinimumWidth(0);
         button.ContentDescription = "识别未接上时，核对完整分支台词并手动续接";
         button.Click += (_, _) => { if (ReferenceEquals(defaultBranchWaitView, body)) defaultBranchWaitManual?.Invoke(); };

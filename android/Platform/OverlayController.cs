@@ -53,12 +53,18 @@ public sealed partial class OverlayController : IDisposable
     private bool confirmationIsAutoStart;
     private ScrollView? actionScroll;
     private LinearLayout? autoPlaybackPausedCard;
+    // 0.4.7 终点等待卡：自动播放保持开启、读取游戏画面等待下一句（黄铜纸面，与游戏模式死角卡同一风格）。
+    private LinearLayout? gameEndWaitCard;
+    private string gameEndWaitHint = "", gameEndWaitDetail = "";
     private string autoPlaybackPausedReason = "";
     private long autoPlaybackPausedRevision;
     private TextView? statusView;
     private TextView? playbackModeView;
     private TextView? handleView;
     private TextView? currentLineView;
+    private View? overlayPortrait;
+    private PortraitFrameDrawable? overlayPortraitFrame;
+    private string? overlayPortraitSpeaker;
     private Button? pauseButton;
     private Button? autoPlayButton;
     private Button? clickFollowButton;
@@ -72,6 +78,9 @@ public sealed partial class OverlayController : IDisposable
     private bool compactControlsVisible = true;
     private bool compactButtonsVisible = true;
     private bool appForeground;
+    /// <summary>15-B2 landscape layout (≥ 600dp wide): bar 580×60 top centre, console 820×250 top centre, reader 500×360 right.</summary>
+    private bool wideConsole;
+    private LinearLayout? consoleHeader;
     private string status = "请选择章节，再开启配音";
     private string currentSpeaker = "", currentText = "";
     public event Action<OverlayCommand>? Command;
@@ -114,7 +123,7 @@ public sealed partial class OverlayController : IDisposable
             BuildView();
             ApplyCaptureVisibility();
             windows.AddView(root, parameters);
-            showing = true;
+            showing = true; PromptBarEpoch++;
             ClampPosition();
         }
         catch (Exception ex) { showing = false; Error?.Invoke("无法显示悬浮控制：" + ex.Message); }
@@ -150,6 +159,7 @@ public sealed partial class OverlayController : IDisposable
     {
         // Invisible 保留列表测量和滚动位置；NotTouchable 防止隐藏期间透明窗口挡住游戏。
         bool fullyHidden = captureHidden && !captureKeepStopControl;
+        ApplyPromptBarCaptureVisibility();
         if (root != null) root.Visibility = fullyHidden ? ViewStates.Invisible : ViewStates.Visible;
         if (parameters != null)
         {
@@ -227,7 +237,7 @@ public sealed partial class OverlayController : IDisposable
             var hint = ReadingButton(browseHintExpanded ? "收起说明 ▴" : model.Page == OverlayBrowsePage.Locate ? "识别原文与当前位置 ▾" : $"{model.Items.Count} 条 · 查看说明 ▾", () =>
             { browseHintExpanded = !browseHintExpanded; RenderBrowse(false); });
             hint.Gravity = GravityFlags.Left | GravityFlags.CenterVertical;
-            browseRows.AddView(hint, new LinearLayout.LayoutParams(-1, ReadDp(28)));
+            browseRows.AddView(hint, new LinearLayout.LayoutParams(-1, Touch()));
             if (browseHintExpanded) AddBrowseText(model.Hint, 12, PgrTheme.Secondary);
         }
         if (model.Actions != null)
@@ -238,7 +248,7 @@ public sealed partial class OverlayController : IDisposable
             {
                 var button = ReadingButton(item.Title, () => SelectBrowseItem(model, item));
                 button.ContentDescription = item.Title + "，" + item.Detail;
-                actions.AddView(button, new LinearLayout.LayoutParams(-2, ReadDp(32)) { RightMargin = ReadDp(5) });
+                actions.AddView(button, new LinearLayout.LayoutParams(-2, Touch()) { RightMargin = ReadDp(5) });
             }
             actionStrip.AddView(actions, new HorizontalScrollView.LayoutParams(-2, -2));
             browseRows.AddView(actionStrip, new LinearLayout.LayoutParams(-1, -2) { BottomMargin = ReadDp(6) });
@@ -294,8 +304,7 @@ public sealed partial class OverlayController : IDisposable
         var card = new LinearLayout(context) { Orientation = Orientation.Vertical, Clickable = true, Focusable = true, Selected = item.Selected,
             ContentDescription = (item.Selected ? "当前项，" : "") + item.Title + "，点击核对详情" };
         card.SetPadding(ReadDp(11), ReadDp(6), ReadDp(11), ReadDp(6));
-        card.Background = PgrTheme.Surface(context, item.Selected ? PgrTheme.Selection : PgrTheme.Panel,
-            item.Selected ? PgrTheme.Red : PgrTheme.Border, item.Selected ? PgrTheme.Red : null);
+        card.Background = PgrTheme.PressableCard(context, item.Selected);
         if (model.Page == OverlayBrowsePage.Lines || item.IsDialogue)
         {
             string text = System.Text.RegularExpressions.Regex.Replace(item.Title, @"^\s*\d+\.\s*", "");
@@ -303,7 +312,7 @@ public sealed partial class OverlayController : IDisposable
             if (separator < 0) separator = text.IndexOf(':');
             string speaker = separator >= 0 ? text[..separator] : "台词";
             string dialogue = separator >= 0 ? text[(separator + 1)..] : text;
-            AddBubbleText(card, (item.Selected ? "当前 · " : "") + speaker, 11, 1, item.Selected ? PgrTheme.Cyan : PgrTheme.Secondary);
+            AddBubbleText(card, (item.Selected ? "当前 · " : "") + speaker, 11, 1, item.Selected ? PgrTheme.RedText : PgrTheme.Steel);
             AddBubbleText(card, dialogue, 15, 2, PgrTheme.Foreground);
         }
         else
@@ -391,16 +400,20 @@ public sealed partial class OverlayController : IDisposable
         var themed = new ContextThemeWrapper(context, global::Android.Resource.Style.ThemeMaterialNoActionBar);
         confirmationTheme = themed;
         var safe = ScreenArea();
-        int width = safe.Right - safe.Left;
+        // 16-C: 820dp, top-centre slot shared with 17-A (was full safe width); dragged position remembered per rotation.
+        int width = Math.Min(ReadDp(820), safe.Right - safe.Left);
         float fontScale = Math.Max(1f, context.Resources?.Configuration?.FontScale ?? 1f);
         int barHeight = ReadDp(48);
-        int rowHeight = ReadDp(dialogueCards ? Math.Max(72f, 13f * fontScale * 4.1f + 10f) : Math.Max(52f, 13f * fontScale * 2.6f + 10f));
+        int rowHeight = ReadDp(dialogueCards ? Math.Max(72f, 13f * fontScale * 4.1f + 10f) : Math.Max(56f, 13f * fontScale * 2.6f + 10f));
         int cardRows = singleConfirmationLabel != null ? 1 : dialogueCards ? Math.Clamp((labels.Count + 1) / 2, 1, 2) : 2;
-        int fullHeight = barHeight + rowHeight * cardRows + ReadDp(4);
+        bool showInstruction = !string.IsNullOrWhiteSpace(instruction);
+        int instructionHeight = showInstruction ? ReadDp(Math.Max(26f, 12f * fontScale * 1.6f + 8f)) : 0;
+        int fullHeight = barHeight + instructionHeight + rowHeight * cardRows + ReadDp(16);
         int compactHeight = ReadDp(Math.Max(64f, 13f * fontScale * 2.6f + 12f));
         var body = new LinearLayout(themed) { Orientation = Orientation.Vertical };
-        body.SetPadding(ReadDp(3), ReadDp(2), ReadDp(3), ReadDp(2));
-        body.SetBackgroundColor(PgrTheme.Raised);
+        body.SetPadding(0, 0, 0, ReadDp(4));
+        // 16-C fusion: cold-white archive paper card area (97%) under a dark title row (S collapsed / M expanded).
+        body.Background = FusionDeco.Over(new ArchivePaperDrawable(density) { Fill = Color.Argb(248, 0xF2, 0xF3, 0xF5), TideDp = 12, EmblemWidthDp = 0, CutBottomRightDp = 14 }, new FusionDeco(density, DecoTier.M) { CutBR = 14, Paper = false });
         Dialog? dialog = null;
         bool collapsed = true;
         bool detailsShown = false;
@@ -409,7 +422,8 @@ public sealed partial class OverlayController : IDisposable
         string preview = previewText ?? string.Join(" / ", labels.Take(2).Select(value => dialogueCards
             ? string.Join(" ", value.ReplaceLineEndings("\n").Split('\n').Take(2))
             : value.ReplaceLineEndings(" ")));
-        string compactTitle = expandedTitle + "\n" + preview;
+        string compactHead = expandedTitle;
+        string compactTitle = compactHead + "\n" + preview;
         bool Current() => !disposed && !captureHidden && dialog != null && ReferenceEquals(confirmationDialog, dialog);
         void ResizeNotice(int height)
         {
@@ -417,17 +431,19 @@ public sealed partial class OverlayController : IDisposable
             if (currentWindow == null) return;
             var bounds = ScreenArea();
             int shownHeight = Math.Min(height, bounds.Bottom - bounds.Top);
-            currentWindow.SetLayout(bounds.Right - bounds.Left, shownHeight);
+            int shownWidth = Math.Min(width, bounds.Right - bounds.Left);
+            currentWindow.SetLayout(shownWidth, shownHeight);
             var position = currentWindow.Attributes!;
-            position.X = bounds.Left;
+            position.X = Math.Clamp(position.X, bounds.Left, Math.Max(bounds.Left, bounds.Right - shownWidth));
             position.Y = Math.Clamp(position.Y, bounds.Top, Math.Max(bounds.Top, bounds.Bottom - shownHeight));
             currentWindow.Attributes = position;
         }
         Button SmallButton(string label, Action action)
         {
             var button = new Button(themed) { Text = label, TextSize = 12 };
-            button.SetAllCaps(false); button.SetTextColor(PgrTheme.Cyan);
-            button.SetMinHeight(0); button.SetMinimumHeight(0); button.SetMinWidth(0); button.SetMinimumWidth(0);
+            PgrTheme.StyleOverlayButton(button, PgrTheme.OverlayTone.Glass);
+            // SPEC C.2: 48dp tall; widths (≥ 72dp tools, 52dp 全文) come from each LayoutParams.
+            button.SetMinHeight(ReadDp(48)); button.SetMinimumHeight(ReadDp(48)); button.SetMinWidth(0); button.SetMinimumWidth(0);
             button.SetPadding(ReadDp(4), 0, ReadDp(4), 0); button.SetMaxLines(1);
             button.Click += (_, _) => { if (Current()) action(); };
             return button;
@@ -448,12 +464,19 @@ public sealed partial class OverlayController : IDisposable
         }
         var toolbar = new LinearLayout(themed) { Orientation = Orientation.Horizontal };
         var dragTitle = new TextView(themed) { Text = compactTitle, TextSize = 13, Gravity = GravityFlags.CenterVertical };
-        dragTitle.SetTextColor(PgrTheme.Foreground); dragTitle.SetMaxLines(2);
-        dragTitle.SetPadding(ReadDp(6), 0, ReadDp(6), 0);
+        dragTitle.SetTextColor(Color.White); dragTitle.SetMaxLines(2);
+        dragTitle.SetPadding(ReadDp(8), 0, ReadDp(6), 0);
         dragTitle.Ellipsize = Android.Text.TextUtils.TruncateAt.End;
         toolbar.AddView(dragTitle, new LinearLayout.LayoutParams(0, -1, 1));
         Button? collapseButton = null;
+        var titleDeco = new DarkPanelDrawable(density, DecoTier.S) { CutBottomRightDp = 10, ShowEmblem = false, Watermark = false, Inscription = false };
+        toolbar.Background = titleDeco;
+        var instructionView = new TextView(themed) { Text = instruction ?? "", TextSize = 12, Gravity = GravityFlags.CenterVertical };
+        instructionView.SetTextColor(PgrTheme.Secondary); instructionView.SetSingleLine(true);
+        instructionView.Ellipsize = Android.Text.TextUtils.TruncateAt.End;
+        instructionView.SetPadding(ReadDp(10), 0, ReadDp(10), 0);
         var content = new LinearLayout(themed) { Orientation = Orientation.Vertical };
+        content.SetPadding(ReadDp(4), ReadDp(2), ReadDp(4), 0);
         var footer = new LinearLayout(themed) { Orientation = Orientation.Horizontal };
         var toolsScroll = new HorizontalScrollView(themed) { HorizontalScrollBarEnabled = true, FillViewport = false };
         toolsScroll.AddView(footer, new HorizontalScrollView.LayoutParams(-2, -1));
@@ -461,10 +484,14 @@ public sealed partial class OverlayController : IDisposable
         void RefreshExpansion()
         {
             content.Visibility = toolsScroll.Visibility = collapsed ? ViewStates.Gone : ViewStates.Visible;
+            instructionView.Visibility = !collapsed && !detailsShown && showInstruction ? ViewStates.Visible : ViewStates.Gone;
+            titleDeco.Tier = collapsed ? DecoTier.S : DecoTier.M; titleDeco.InvalidateSelf();
             collapseButton!.Text = collapsed ? "展开" : "收起";
-            dragTitle.LayoutParameters = collapsed ? new LinearLayout.LayoutParams(0, -1, 1) : new LinearLayout.LayoutParams(ReadDp(112), -1);
+            dragTitle.LayoutParameters = collapsed ? new LinearLayout.LayoutParams(0, -1, 1) : new LinearLayout.LayoutParams(ReadDp(300), -1);
             dragTitle.SetMaxLines(collapsed ? 2 : 1);
-            dragTitle.Text = collapsed ? compactTitle : detailsShown ? "核对完整内容 · 可拖动" : expandedTitle;
+            if (collapsed) dragTitle.SetText(PgrTheme.TitleWithPreview(compactHead, preview, Color.White, PgrTheme.A(Color.White, 190)), TextView.BufferType.Spannable);
+            else dragTitle.Text = detailsShown ? "核对完整内容 · 可拖动" : expandedTitle;
+            dragTitle.SetTypeface(collapsed ? PgrTheme.SansMedium : PgrTheme.SansBold, collapsed ? TypefaceStyle.Normal : TypefaceStyle.Bold);
             toolbar.LayoutParameters = new LinearLayout.LayoutParams(-1, collapsed ? compactHeight - ReadDp(4) : barHeight);
             ResizeNotice(collapsed ? compactHeight : detailsShown ? Math.Min(ReadDp(280), (int)((safe.Bottom - safe.Top) * .6f)) : fullHeight);
         }
@@ -473,14 +500,16 @@ public sealed partial class OverlayController : IDisposable
             collapsed = !collapsed;
             RefreshExpansion();
         });
-        toolbar.AddView(collapseButton, new LinearLayout.LayoutParams(ReadDp(Math.Max(52, 24 * fontScale + 12)), -1));
-        toolbar.AddView(SmallButton("取消", () => DismissConfirmation()), new LinearLayout.LayoutParams(ReadDp(Math.Max(48, 24 * fontScale + 12)), -1));
+        toolbar.AddView(collapseButton, new LinearLayout.LayoutParams(ReadDp(Math.Max(72, 24 * fontScale + 12)), -1) { TopMargin = ReadDp(4), BottomMargin = ReadDp(4), LeftMargin = ReadDp(2) });
+        toolbar.AddView(SmallButton("取消", () => DismissConfirmation()), new LinearLayout.LayoutParams(ReadDp(Math.Max(72, 24 * fontScale + 12)), -1) { TopMargin = ReadDp(4), BottomMargin = ReadDp(4), LeftMargin = ReadDp(2), RightMargin = ReadDp(4) });
         body.AddView(toolbar, new LinearLayout.LayoutParams(-1, compactHeight - ReadDp(4)));
+        body.AddView(instructionView, new LinearLayout.LayoutParams(-1, Math.Max(1, instructionHeight)));
         body.AddView(content, new LinearLayout.LayoutParams(-1, 0, 1));
-        void FooterButton(string label, Action action, bool enabled = true)
+        void FooterButton(string label, Action action, bool enabled = true, bool primary = false)
         {
             var button = SmallButton(label, action); button.Enabled = enabled;
-            footer.AddView(button, new LinearLayout.LayoutParams(ReadDp(Math.Max(48, label.Length * 12 * fontScale + 16)), -1));
+            if (primary) PgrTheme.StyleOverlayButton(button, PgrTheme.OverlayTone.Primary);
+            footer.AddView(button, new LinearLayout.LayoutParams(ReadDp(Math.Max(72, label.Length * 12 * fontScale + 16)), -1) { TopMargin = ReadDp(4), BottomMargin = ReadDp(4), LeftMargin = ReadDp(2) });
         }
         void ShowDetail(int choice)
         {
@@ -490,10 +519,11 @@ public sealed partial class OverlayController : IDisposable
             toolsScroll.ScrollTo(0, 0);
             var scroll = new ScrollView(themed);
             var detail = new TextView(themed) { Text = labels[choice] + (labels[choice] == section ? "" : "\n\n" + section) + "\n" + instruction, TextSize = 15 };
-            detail.SetTextColor(PgrTheme.Foreground); detail.SetPadding(ReadDp(8), ReadDp(5), ReadDp(8), ReadDp(5));
+            detail.SetTextColor(PgrTheme.Foreground); detail.SetPadding(ReadDp(10), ReadDp(5), ReadDp(8), ReadDp(5));
+            detail.SetLineSpacing(ReadDp(3), 1);
             scroll.AddView(detail); content.AddView(scroll, new LinearLayout.LayoutParams(-1, -1));
             FooterButton("返回通知", () => { collapsed = true; RenderCards(); });
-            FooterButton(singleConfirmationLabel ?? choiceActionLabel ?? "确认就是这句", () => Confirm(choice));
+            FooterButton(singleConfirmationLabel ?? choiceActionLabel ?? "确认就是这句", () => Confirm(choice), primary: true);
             RefreshExpansion();
         }
         void RenderCards()
@@ -525,19 +555,23 @@ public sealed partial class OverlayController : IDisposable
                             ContentDescription = labels[choice] + "。确认并继续配音。长按或点全文核对完整台词。"
                         };
                         dialogueCard.SetGravity(GravityFlags.CenterVertical);
+                        dialogueCard.Background = new Android.Graphics.Drawables.RippleDrawable(Android.Content.Res.ColorStateList.ValueOf(PgrTheme.A(PgrTheme.Red, 60)),
+                            PgrTheme.Plate(themed, Color.White, PgrTheme.Red, PgrTheme.CutSmall, Corners.BottomRight, PgrTheme.Red, AccentEdge.Left),
+                            PgrTheme.Plate(themed, Color.White, null, PgrTheme.CutSmall, Corners.BottomRight));
                         dialogueCard.SetPadding(ReadDp(6), ReadDp(3), ReadDp(6), ReadDp(3));
                         var optionText = new TextView(themed) { Text = parts[0], TextSize = 11 };
-                        optionText.SetTextColor(PgrTheme.Cyan); optionText.SetMaxLines(1);
+                        optionText.SetTextColor(PgrTheme.Steel); optionText.SetTypeface(PgrTheme.SansMedium, TypefaceStyle.Normal); optionText.SetMaxLines(1);
                         optionText.Ellipsize = Android.Text.TextUtils.TruncateAt.End;
                         var dialogueText = new TextView(themed) { Text = parts.Length > 1 ? parts[1] : parts[0], TextSize = 13 };
                         dialogueText.SetTextColor(PgrTheme.Foreground); dialogueText.SetMaxLines(2);
                         dialogueText.Ellipsize = Android.Text.TextUtils.TruncateAt.End;
                         dialogueCard.AddView(optionText, new LinearLayout.LayoutParams(-1, -2));
                         dialogueCard.AddView(dialogueText, new LinearLayout.LayoutParams(-1, -2));
+                        if (choiceActionLabel != null) dialogueCard.AddView(ActionHint(choiceActionLabel), new LinearLayout.LayoutParams(-1, -2));
                         dialogueCard.Click += (_, _) => Confirm(choice);
                         dialogueCard.LongClick += (_, e) => { if (Current()) ShowDetail(choice); e.Handled = true; };
                         cell.AddView(dialogueCard, new LinearLayout.LayoutParams(0, -1, 1));
-                        cell.AddView(SmallButton("全文", () => ShowDetail(choice)), new LinearLayout.LayoutParams(ReadDp(48), -1));
+                        cell.AddView(SmallButton("全文", () => ShowDetail(choice)), new LinearLayout.LayoutParams(ReadDp(52), -1) { LeftMargin = ReadDp(2) });
                         continue;
                     }
                     var card = SmallButton(labels[choice], () => { if (singleConfirmationLabel != null) ShowDetail(choice); else Confirm(choice); });
@@ -547,11 +581,24 @@ public sealed partial class OverlayController : IDisposable
                     card.Gravity = GravityFlags.CenterVertical | GravityFlags.Left;
                     card.ContentDescription = labels[choice] + (choiceActionLabel == null ? "" : "。" + choiceActionLabel) + "。长按或点全文核对完整台词。";
                     card.LongClick += (_, e) => { if (Current()) ShowDetail(choice); e.Handled = true; };
-                    cell.AddView(card, new LinearLayout.LayoutParams(0, -1, 1));
-                    cell.AddView(SmallButton("全文", () => ShowDetail(choice)), new LinearLayout.LayoutParams(ReadDp(48), -1));
+                    card.Background = new Android.Graphics.Drawables.RippleDrawable(Android.Content.Res.ColorStateList.ValueOf(PgrTheme.A(PgrTheme.Red, 60)),
+                        PgrTheme.Plate(themed, Color.White, PgrTheme.Brass, PgrTheme.CutSmall, Corners.BottomRight),
+                        PgrTheme.Plate(themed, Color.White, null, PgrTheme.CutSmall, Corners.BottomRight));
+                    card.SetTextColor(PgrTheme.Foreground);
+                    if (choiceActionLabel != null)
+                    {
+                        // 16-C: choiceActionLabel shown at the card's lower right (source text, previously only in the accessibility description).
+                        var holder = new FrameLayout(themed);
+                        holder.AddView(card, new FrameLayout.LayoutParams(-1, -1));
+                        var hint = ActionHint(choiceActionLabel); hint.Clickable = false; hint.Focusable = false;
+                        holder.AddView(hint, new FrameLayout.LayoutParams(-2, -2, GravityFlags.Bottom | GravityFlags.End) { RightMargin = ReadDp(8), BottomMargin = ReadDp(3) });
+                        cell.AddView(holder, new LinearLayout.LayoutParams(0, -1, 1));
+                    }
+                    else cell.AddView(card, new LinearLayout.LayoutParams(0, -1, 1));
+                    cell.AddView(SmallButton("全文", () => ShowDetail(choice)), new LinearLayout.LayoutParams(ReadDp(52), -1) { LeftMargin = ReadDp(2) });
                 }
             }
-            if (singleConfirmationLabel != null) FooterButton(singleConfirmationLabel, () => Confirm(0));
+            if (singleConfirmationLabel != null) FooterButton(singleConfirmationLabel, () => Confirm(0), primary: true);
             if (optionAction != null) FooterButton(optionActionLabel == "按选项核对" ? "按选项" : optionActionLabel ?? "更多", () => RunAction(optionAction));
             if (ocrAction != null) FooterButton(anchorCards ? "识别下一句" : ocrActionLabel ?? "重新定位", () => RunAction(ocrAction));
             if (labels.Count > 4)
@@ -597,8 +644,9 @@ public sealed partial class OverlayController : IDisposable
         window.SetLayout(width, compactHeight);
         window.SetGravity(GravityFlags.Top | GravityFlags.Left);
         var attributes = window.Attributes!;
-        attributes.X = safe.Left;
-        attributes.Y = safe.Top; window.Attributes = attributes;
+        var place = NoticePlacement(width, compactHeight);
+        attributes.X = place.X;
+        attributes.Y = place.Y; window.Attributes = attributes;
         float downX = 0, downY = 0; int originX = 0, originY = 0; bool dragged = false;
         dragTitle.Touch += (_, e) =>
         {
@@ -616,6 +664,8 @@ public sealed partial class OverlayController : IDisposable
             }
             else if (e.Event.ActionMasked == MotionEventActions.Up && !dragged && collapsed)
             { collapsed = false; RefreshExpansion(); }
+            else if (e.Event.ActionMasked == MotionEventActions.Up && dragged)
+                SavePlacement("notice", window.Attributes!.X, window.Attributes!.Y, window.DecorView.Width, window.DecorView.Height);
             e.Handled = true;
         };
     }
@@ -680,7 +730,10 @@ public sealed partial class OverlayController : IDisposable
         if (currentSpeaker == nextSpeaker && currentText == nextText) return;
         currentSpeaker = nextSpeaker;
         currentText = nextText;
+        bool wasFull = slimLineFull;
+        CollapseSlimLine();
         RefreshCurrentLine();
+        if (wasFull && showing) ClampPosition();
     });
 
     private void RefreshCurrentLine()
@@ -690,7 +743,13 @@ public sealed partial class OverlayController : IDisposable
             : (string.IsNullOrWhiteSpace(currentSpeaker) ? "" : currentSpeaker + "：") + currentText;
         // Two fixed lines keep a long sentence from growing the window or hiding its buttons.
         currentLineView.Text = text.ReplaceLineEndings(" ");
-        currentLineView.ContentDescription = "当前台词，" + text;
+        StyleCurrentLine(currentLineView, text);
+        string portraitName = string.IsNullOrWhiteSpace(currentSpeaker) ? "旁白" : currentSpeaker;
+        if (overlayPortrait != null && overlayPortraitFrame != null && overlayPortraitSpeaker != portraitName)
+        {
+            var frame = overlayPortraitFrame; overlayPortraitSpeaker = portraitName; frame.Name = portraitName; frame.Image = null;
+            PortraitStore.Request(overlayPortrait, portraitName, standee: false, maxPx: Dp(64), image => { if (!disposed && frame.Name == portraitName) frame.Image = image; });
+        }
     }
 
     public void UpdateClickFollow(bool active) => OnMain(() =>
@@ -703,10 +762,10 @@ public sealed partial class OverlayController : IDisposable
         {
             clickFollowButton.Text = active ? "停止点按" : "点按跟随";
             clickFollowButton.ContentDescription = active ? "停止点按跟随" : "开启点按跟随";
-            PgrTheme.StyleButton(clickFollowButton, primary: active);
+            StyleControl(clickFollowButton, primary: active);
             clickFollowButton.SetPadding(Dp(3), Dp(7), Dp(3), Dp(7));
-            clickFollowButton.SetMinHeight(Dp(44)); clickFollowButton.SetMinimumHeight(Dp(44));
-            clickFollowButton.SetCompoundDrawablesWithIntrinsicBounds(null, Icon(active ? "pause" : "locate"), null, null);
+            clickFollowButton.SetMinHeight(Touch()); clickFollowButton.SetMinimumHeight(Touch());
+            SetActionIcon(clickFollowButton, active ? "pause" : "locate");
         }
         RefreshPresentation();
     });
@@ -744,7 +803,7 @@ public sealed partial class OverlayController : IDisposable
         {
             playbackModeView.Text = clickFollowing ? "当前模式 · 点按跟随" : autoPlaying
                 ? "当前模式 · 自动播放" : "当前模式 · 手动播放";
-            playbackModeView.SetTextColor(clickFollowing || autoPlaying ? PgrTheme.Cyan : PgrTheme.Secondary);
+            playbackModeView.SetTextColor(clickFollowing || autoPlaying ? PgrTheme.RedText : PgrTheme.Steel);
             playbackModeView.ContentDescription = playbackModeView.Text;
         }
     }
@@ -762,14 +821,13 @@ public sealed partial class OverlayController : IDisposable
         RefreshPlaybackMode();
         if (statusView != null)
         {
-            statusView.Text = text;
-            statusView.SetTextColor(paused ? PgrTheme.Secondary : PgrTheme.Foreground);
+            StyleStatus(statusView, text, paused);
         }
         if (pauseButton != null)
         {
             pauseButton.Text = paused ? "继续" : "暂停";
             pauseButton.ContentDescription = pauseButton.Text;
-            if (pauseChanged) pauseButton.SetCompoundDrawablesWithIntrinsicBounds(null, Icon(paused ? "play" : "pause"), null, null);
+            if (pauseChanged) SetActionIcon(pauseButton, paused ? "play" : "pause");
         }
         if (autoPlayButton != null)
         {
@@ -777,11 +835,11 @@ public sealed partial class OverlayController : IDisposable
             autoPlayButton.ContentDescription = autoPlaying ? "停止自动播放" : "开始自动播放";
             if (autoChanged)
             {
-                PgrTheme.StyleButton(autoPlayButton, primary: autoPlaying);
+                StyleControl(autoPlayButton, primary: autoPlaying);
                 autoPlayButton.SetPadding(Dp(3), Dp(7), Dp(3), Dp(7));
-                autoPlayButton.SetMinHeight(Dp(44));
-                autoPlayButton.SetMinimumHeight(Dp(44));
-                autoPlayButton.SetCompoundDrawablesWithIntrinsicBounds(null, Icon(autoPlaying ? "pause" : "play"), null, null);
+                autoPlayButton.SetMinHeight(Touch());
+                autoPlayButton.SetMinimumHeight(Touch());
+                SetActionIcon(autoPlayButton, autoPlaying ? "pause" : "play");
             }
         }
         if (autoChanged) RefreshPresentation();
@@ -848,6 +906,46 @@ public sealed partial class OverlayController : IDisposable
         catch (Exception ex) { DismissConfirmation(); Error?.Invoke("无法显示暂停通知：" + ex.Message); }
     });
 
+    /// <summary>0.4.7 终点等待：非模态卡片，不遮挡游戏点击；自动播放仍在运行。</summary>
+    public void ShowGameEndWaiting(string hint, string detail) => OnMain(() =>
+    {
+        if (disposed) return;
+        gameEndWaitHint = hint.Trim(); gameEndWaitDetail = detail.Trim();
+        RefreshGameEndWaiting();
+    });
+
+    public void ClearGameEndWaiting() => OnMain(() =>
+    {
+        if (disposed) return;
+        gameEndWaitHint = gameEndWaitDetail = "";
+        RefreshGameEndWaiting();
+    });
+
+    private void RefreshGameEndWaiting()
+    {
+        if (gameEndWaitCard is not { } card) return;
+        card.RemoveAllViews();
+        bool visible = gameEndWaitHint.Length > 0;
+        card.Visibility = visible ? ViewStates.Visible : ViewStates.Gone;
+        if (!visible) return;
+        var eyebrowRow = new LinearLayout(context) { Orientation = Orientation.Horizontal };
+        eyebrowRow.SetGravity(GravityFlags.CenterVertical);
+        var pulse = new View(context);
+        pulse.Background = PgrTheme.Plate(context, PgrArt.GoldLine, null, 0, Corners.None);
+        eyebrowRow.AddView(pulse, new LinearLayout.LayoutParams(Dp(6), Dp(6)) { RightMargin = Dp(6) });
+        var blink = new global::Android.Views.Animations.AlphaAnimation(1f, .25f) { Duration = 900, RepeatMode = global::Android.Views.Animations.RepeatMode.Reverse, RepeatCount = global::Android.Views.Animations.Animation.Infinite };
+        pulse.StartAnimation(blink);
+        eyebrowRow.AddView(PgrUi.En(context, PgrVoice.Following.GameEndWaitPolicy.Eyebrow, 9.5f, PgrTheme.BrassText), new LinearLayout.LayoutParams(0, -2, 1));
+        card.AddView(eyebrowRow, new LinearLayout.LayoutParams(-1, -2));
+        var heading = PgrTheme.Apply(new TextView(context) { Text = gameEndWaitHint }, PgrTheme.Role.Heading);
+        heading.TextSize = FontSize(15);
+        card.AddView(heading, new LinearLayout.LayoutParams(-1, -2) { TopMargin = Dp(2) });
+        var detail = new TextView(context) { Text = gameEndWaitDetail, TextSize = FontSize(12) };
+        detail.SetTextColor(PgrTheme.Secondary);
+        detail.SetLineSpacing(Dp(2), 1);
+        card.AddView(detail, new LinearLayout.LayoutParams(-1, -2) { TopMargin = Dp(2) });
+    }
+
     public void ClearAutoPlaybackPaused() => OnMain(() =>
     {
         if (disposed) return;
@@ -869,8 +967,8 @@ public sealed partial class OverlayController : IDisposable
         var header = new LinearLayout(context) { Orientation = Orientation.Horizontal };
         header.SetGravity(GravityFlags.CenterVertical);
         var title = new TextView(context) { Text = "自动播放已暂停", TextSize = FontSize(15) };
-        title.SetTextColor(PgrTheme.Red);
-        title.SetTypeface(Typeface.Default, TypefaceStyle.Bold);
+        title.SetTextColor(PgrTheme.RedText);
+        title.SetTypeface(PgrTheme.SansBold, TypefaceStyle.Bold);
         header.AddView(title, new LinearLayout.LayoutParams(0, -2, 1));
         var dismiss = new Button(context)
         {
@@ -878,15 +976,15 @@ public sealed partial class OverlayController : IDisposable
             TextSize = FontSize(12),
             ContentDescription = "知道了，仅关闭暂停提示，不恢复自动播放"
         };
-        PgrTheme.StyleButton(dismiss, primary: true);
+        StyleControl(dismiss, primary: true);
         dismiss.SetPadding(Dp(5), Dp(5), Dp(5), Dp(5));
-        dismiss.SetMinHeight(Dp(40)); dismiss.SetMinimumHeight(Dp(40));
+        dismiss.SetMinHeight(Touch()); dismiss.SetMinimumHeight(Touch());
         dismiss.Click += (_, _) =>
         {
             if (disposed || revision != autoPlaybackPausedRevision || !ReferenceEquals(card, autoPlaybackPausedCard)) return;
             ClearAutoPlaybackPaused();
         };
-        header.AddView(dismiss, new LinearLayout.LayoutParams(Dp(68), Dp(40)) { LeftMargin = Dp(6) });
+        header.AddView(dismiss, new LinearLayout.LayoutParams(ReadDp(72), Touch()) { LeftMargin = Dp(6) });
         card.AddView(header, new LinearLayout.LayoutParams(-1, -2));
         var reason = new TextView(context) { Text = autoPlaybackPausedReason, TextSize = FontSize(13) };
         reason.SetTextColor(PgrTheme.Foreground);
@@ -903,6 +1001,7 @@ public sealed partial class OverlayController : IDisposable
         if (disposed) return;
         bool revealBrowse = refreshBrowse && value && !expanded && browsePage.HasValue && showing;
         if (!value) DismissConfirmation();
+        CollapseSlimLine();
         expanded = value;
         // 同一主线程内先取得当前章节的模型，再让收起的阅读页重新可见。
         if (revealBrowse) BrowseRefreshRequested?.Invoke();
@@ -933,41 +1032,82 @@ public sealed partial class OverlayController : IDisposable
         for (int i = 0; i < browseTabs.Count; i++)
         {
             bool selected = i == (browsePage.HasValue ? (int)browsePage.Value + 1 : 0);
-            PgrTheme.StyleButton(browseTabs[i], selected: selected, quiet: !selected);
+            StyleControl(browseTabs[i], selected: selected, quiet: !selected);
+            if (wideConsole && !selected) browseTabs[i].SetTextColor(PgrTheme.A(Color.White, 215)); // on the dark title row
             browseTabs[i].TextSize = FontSize(11);
             browseTabs[i].SetPadding(Dp(1), Dp(2), Dp(1), Dp(2));
-            browseTabs[i].SetMinHeight(Dp(34)); browseTabs[i].SetMinimumHeight(Dp(34));
+            browseTabs[i].SetMinHeight(Touch()); browseTabs[i].SetMinimumHeight(Touch());
         }
         for (int i = 0; i < browseSideTabs.Count; i++)
         {
             bool selected = i == (browsePage.HasValue ? (int)browsePage.Value + 1 : 0);
-            PgrTheme.StyleButton(browseSideTabs[i], selected: selected, quiet: !selected);
+            StyleControl(browseSideTabs[i], selected: selected, quiet: !selected);
             browseSideTabs[i].TextSize = 12;
             browseSideTabs[i].SetSingleLine(true);
             browseSideTabs[i].SetPadding(ReadDp(1), ReadDp(2), ReadDp(1), ReadDp(2));
-            browseSideTabs[i].SetMinHeight(ReadDp(38)); browseSideTabs[i].SetMinimumHeight(ReadDp(38));
+            browseSideTabs[i].SetMinHeight(Touch()); browseSideTabs[i].SetMinimumHeight(Touch());
+        }
+        if (consoleHeader != null) consoleHeader.Visibility = expanded && !reading ? ViewStates.Visible : ViewStates.Gone;
+        if (root != null)
+        {
+            // 15-B2 fusion: dark frame (bar S / console M / reader L) around cold-white paper surfaces; the ball keeps its own skin.
+            bool framed = wideConsole && (expanded || compact);
+            root.Orientation = compact && wideConsole ? Orientation.Horizontal : Orientation.Vertical;
+            // 15-B2 ①: the collapsed ball is light paper + dark diagonal top plate + brass orbit (legible on dark scenes).
+            bool ball = !expanded && !compact && !CaptureStopVisible;
+            // 方案 1 横屏台词条：外框上 3dp（由纸面上方透明 3dp 露出）+ 纸面 38dp + 底部细线 4dp + 1dp = 46dp。
+            bool slimBar = compact && wideConsole;
+            root.Background = framed
+                ? new DarkPanelDrawable(density, reading ? DecoTier.L : expanded ? DecoTier.M : DecoTier.S)
+                    { CutBottomRightDp = 14, Inscription = false, Watermark = reading, ShowEmblem = false, Mark = reading ? "READ" : null, TideDp = expanded ? 18 : 8, SlimTideDp = slimBar ? 4 : 0 }
+                : ball ? new FloatingBallDrawable(density * uiScale)
+                : PgrTheme.Plate(context, PgrTheme.Glass, PgrTheme.GlassLine, PgrTheme.CutMedium, Corners.Diagonal,
+                    brackets: Color.Argb(150, PgrTheme.Cyan.R, PgrTheme.Cyan.G, PgrTheme.Cyan.B), sheen: PgrTheme.SheenLight);
+            int pad = framed ? ReadDp(4) : ball ? 0 : Dp(2);
+            root.SetPadding(pad, slimBar ? 0 : pad, pad, slimBar ? ReadDp(2) : framed ? ReadDp(10) : pad);
         }
         if (compactPanel != null) compactPanel.Visibility = compact ? ViewStates.Visible : ViewStates.Gone;
         if (compactActions != null) compactActions.Visibility = compactButtonsVisible ? ViewStates.Visible : ViewStates.Gone;
         if (handleView != null)
         {
-            handleView.Visibility = reading ? ViewStates.Gone : ViewStates.Visible;
+            handleView.Visibility = reading || expanded && wideConsole ? ViewStates.Gone : ViewStates.Visible;
             handleView.Text = expanded ? "配音控制" : compact
                 ? (clickFollowing ? "点按跟随 · 点此展开" : autoPlaying ? "自动播放 · 点此展开" : "配音 · 点此展开") : "配";
-            handleView.TextSize = FontSize(compact ? 10 : 15);
+            bool ballHandle = !expanded && !compact;
+            bool sideHandle = compact && wideConsole;
+            if (sideHandle)
+            {
+                // 左块一行：「自动播放 / 点按跟随 · 点此展开」放不下时缩小字号，不换行。
+                float sp = context.Resources!.DisplayMetrics!.ScaledDensity;
+                handleView.SetAutoSizeTextTypeUniformWithConfiguration((int)(7 * sp), Math.Max((int)(7 * sp) + 1, (int)(FontSize(10) * sp)), 1, (int)global::Android.Util.ComplexUnitType.Px);
+            }
+            else
+            {
+                handleView.SetAutoSizeTextTypeWithDefaults(global::Android.Widget.AutoSizeTextType.None);
+                handleView.TextSize = FontSize(compact ? 10 : ballHandle ? 21 : 15);
+            }
             handleView.Gravity = (expanded || compact ? GravityFlags.Start : GravityFlags.CenterHorizontal) | GravityFlags.CenterVertical;
-            handleView.SetCompoundDrawablesWithIntrinsicBounds(expanded || compact ? Icon("wave", compact ? 12 : 18) : null, null,
+            handleView.SetCompoundDrawablesWithIntrinsicBounds(expanded || compact && !sideHandle ? Icon("wave", compact ? 12 : 18) : null, null,
                 expanded || compact ? Icon(expanded ? "chevron_up" : "chevron_down", compact ? 12 : 17, PgrTheme.Secondary) : null, null);
             handleView.CompoundDrawablePadding = Dp(compact ? 4 : 9);
-            handleView.SetPadding(Dp(expanded ? 13 : compact ? 6 : 0), 0, Dp(expanded ? 12 : compact ? 5 : 0), 0);
-            handleView.Background = PgrTheme.Surface(context, expanded ? PgrTheme.Panel : PgrTheme.Selection,
-                Color.Transparent, expanded ? null : PgrTheme.Red);
+            handleView.SetPadding(Dp(expanded ? 13 : compact ? 6 : 0), ballHandle ? Dp(9) : 0, Dp(expanded ? 12 : compact ? 5 : 0), 0);
+            handleView.Background = compact && wideConsole || ballHandle ? null : HandleBackground(expanded, compact);
+            handleView.SetTextColor(compact && wideConsole ? Color.White : PgrTheme.Foreground);
+            handleView.SetMaxLines(1);
             handleView.ContentDescription = expanded ? "配音控制，点击收起，按住拖动" : compact
                 ? "台词悬浮条，点击展开完整控制，按住拖动" : "战双配音悬浮球，点击展开，按住拖动";
             if (handleView.LayoutParameters is LinearLayout.LayoutParams handleLayout)
             {
-                int height = Dp(compact ? 26 : 54);
-                if (handleLayout.Height != height) { handleLayout.Height = height; handleView.LayoutParameters = handleLayout; }
+                bool side = compact && wideConsole;
+                int height = side ? -1 : Dp(compact ? 26 : expanded ? 54 : 58), width = side ? ReadDp(104) : -1;
+                if (handleLayout.Height != height || handleLayout.Width != width) { handleLayout.Height = height; handleLayout.Width = width; handleView.LayoutParameters = handleLayout; }
+            }
+            if (compactPanel?.LayoutParameters is LinearLayout.LayoutParams compactLayout)
+            {
+                bool side = compact && wideConsole;
+                int width = side ? 0 : -1, height = side ? -1 : -2; float weight = side ? 1 : 0;
+                if (compactLayout.Width != width || compactLayout.Height != height || compactLayout.Weight != weight)
+                { compactLayout.Width = width; compactLayout.Height = height; compactLayout.Weight = weight; compactPanel.LayoutParameters = compactLayout; }
             }
         }
         if (compactControlsButton != null)
@@ -985,10 +1125,14 @@ public sealed partial class OverlayController : IDisposable
     private void BuildView()
     {
         if (root != null) return;
+        slimLineFull = false;
+        wideConsole = displayWidth > displayHeight && displayWidth / Math.Max(.1f, density) >= 600;
         root = new LinearLayout(context) { Orientation = Orientation.Vertical };
         root.SetPadding(Dp(2), Dp(2), Dp(2), Dp(2));
-        root.Background = PgrTheme.Surface(context, PgrTheme.Background, PgrTheme.Border);
-        root.Elevation = Dp(10);
+        // Translucent HUD glass: the game remains readable behind the controls.
+        root.Background = PgrTheme.Plate(context, PgrTheme.Glass, PgrTheme.GlassLine, PgrTheme.CutMedium, Corners.Diagonal,
+            brackets: Color.Argb(150, PgrTheme.Cyan.R, PgrTheme.Cyan.G, PgrTheme.Cyan.B), sheen: PgrTheme.SheenLight);
+        root.Elevation = Dp(4);
         root.LayoutChange += (_, _) =>
         {
             if (!showing || parameters == null) return;
@@ -1025,10 +1169,10 @@ public sealed partial class OverlayController : IDisposable
             ContentDescription = "战双配音悬浮球，点击展开，按住拖动"
         };
         handleView = handle;
-        handle.SetTypeface(Typeface.Create("sans-serif-medium", TypefaceStyle.Normal), TypefaceStyle.Normal);
+        handle.SetTypeface(PgrTheme.SansBold, TypefaceStyle.Bold);
         handle.SetTextColor(PgrTheme.Foreground);
         handle.CompoundDrawablePadding = Dp(9);
-        handle.Background = PgrTheme.Surface(context, PgrTheme.Selection, Color.Transparent, PgrTheme.Red);
+        handle.Background = HandleBackground(false, false);
         handle.SetOnTouchListener(new DragListener(this));
         root.AddView(handle, new LinearLayout.LayoutParams(-1, Dp(54)));
         compactPanel = new LinearLayout(context) { Orientation = Orientation.Vertical };
@@ -1038,7 +1182,13 @@ public sealed partial class OverlayController : IDisposable
         currentLineView.SetMaxLines(2);
         currentLineView.Ellipsize = global::Android.Text.TextUtils.TruncateAt.End;
         currentLineView.SetPadding(Dp(2), 0, Dp(2), 0);
-        compactPanel.AddView(currentLineView, new LinearLayout.LayoutParams(-1, Dp(30)));
+        // Speaker portrait (user-local image or geometric monogram) beside the two-line current text.
+        var lineRow = new LinearLayout(context) { Orientation = Orientation.Horizontal };
+        overlayPortraitFrame = new PortraitFrameDrawable(context.Resources!.DisplayMetrics!.Density) { ShowSerial = false };
+        overlayPortrait = new View(context) { Background = overlayPortraitFrame, ImportantForAccessibility = ImportantForAccessibility.No };
+        lineRow.AddView(overlayPortrait, new LinearLayout.LayoutParams(Dp(30), Dp(30)) { RightMargin = Dp(4) });
+        lineRow.AddView(currentLineView, new LinearLayout.LayoutParams(0, Dp(30), 1));
+        compactPanel.AddView(lineRow, new LinearLayout.LayoutParams(-1, Dp(30)));
         RefreshCurrentLine();
         compactActions = new LinearLayout(context) { Orientation = Orientation.Horizontal };
         foreach (var item in new[]
@@ -1049,16 +1199,41 @@ public sealed partial class OverlayController : IDisposable
         })
         {
             var button = new Button(context) { Text = item.Label, TextSize = FontSize(10), ContentDescription = item.Description };
-            PgrTheme.StyleButton(button, primary: item.Action == OverlayCommand.Replay);
+            StyleControl(button, primary: item.Action == OverlayCommand.Replay);
+            // 方案 1：外观 32dp 高，触摸范围上下各多 6dp（44dp），都在台词条窗口之内，不会多挡游戏。
+            if (wideConsole) button.Background = new global::Android.Graphics.Drawables.InsetDrawable(button.Background, 0, ReadDp(6), 0, ReadDp(6));
             button.SetPadding(Dp(2), Dp(1), Dp(2), Dp(1));
             button.SetSingleLine(true);
-            button.SetMinHeight(Dp(28)); button.SetMinimumHeight(Dp(28));
+            int minHeight = wideConsole ? 0 : Touch();
+            button.SetMinHeight(minHeight); button.SetMinimumHeight(minHeight);
             var command = item.Action;
             button.Click += (_, _) => Command?.Invoke(command);
-            compactActions.AddView(button, new LinearLayout.LayoutParams(0, Dp(28), 1) { LeftMargin = Dp(1), RightMargin = Dp(1) });
+            compactActions.AddView(button, wideConsole ? new LinearLayout.LayoutParams(ReadDp(72), ReadDp(44)) { LeftMargin = ReadDp(3) }
+                : new LinearLayout.LayoutParams(0, Touch(), 1) { LeftMargin = Dp(1), RightMargin = Dp(1) });
         }
         compactPanel.AddView(compactActions, new LinearLayout.LayoutParams(-1, -2) { TopMargin = Dp(4) });
         root.AddView(compactPanel, new LinearLayout.LayoutParams(-1, -2));
+        compactPanel.Background = FusionDeco.Over(PgrTheme.Plate(context, Color.Argb(248, 0xF2, 0xF3, 0xF5), null, PgrTheme.CutSmall, Corners.BottomRight), new FusionDeco(context.Resources!.DisplayMetrics!.Density, DecoTier.S) { CutBR = PgrTheme.CutSmall });
+        if (wideConsole)
+        {
+            // 15-B2 bar: dark handle block「配音 / 点此展开」at left, line in the middle, the three small keys at right — one 60dp row.
+            compactPanel.Orientation = Orientation.Horizontal;
+            compactPanel.SetGravity(GravityFlags.CenterVertical);
+            // 纸面上下各留 3dp 透明，露出外框；按钮 44dp 触摸高正好填满。
+            compactPanel.Background = new global::Android.Graphics.Drawables.InsetDrawable(compactPanel.Background, 0, ReadDp(3), 0, ReadDp(3));
+            compactPanel.SetPadding(Dp(4), 0, Dp(4), 0);
+            lineRow.LayoutParameters = new LinearLayout.LayoutParams(0, -1, 1);
+            lineRow.SetGravity(GravityFlags.CenterVertical);
+            overlayPortrait.LayoutParameters = new LinearLayout.LayoutParams(Dp(24), Dp(24)) { RightMargin = Dp(4) };
+            currentLineView.LayoutParameters = new LinearLayout.LayoutParams(0, -2, 1);
+            currentLineView.TextSize = FontSize(11);
+            currentLineView.SetMaxLines(1);
+            currentLineView.Gravity = GravityFlags.CenterVertical | GravityFlags.Start;
+            lineRow.Clickable = true;
+            lineRow.Click += (_, _) => ToggleSlimLine();
+            compactActions.LayoutParameters = new LinearLayout.LayoutParams(-2, -1) { LeftMargin = ReadDp(4) };
+            compactActions.SetGravity(GravityFlags.CenterVertical);
+        }
         panel = new LinearLayout(context) { Orientation = Orientation.Vertical, Visibility = ViewStates.Gone };
         panel.SetPadding(Dp(9), Dp(8), Dp(9), Dp(6));
         browseTabs.Clear();
@@ -1069,7 +1244,7 @@ public sealed partial class OverlayController : IDisposable
             int index = i;
             var tab = new Button(context) { Text = tabLabels[i], TextSize = FontSize(11), ContentDescription = "悬浮" + tabLabels[i] + "页" };
             tab.Click += (_, _) => { if (index == 0) ShowControlPage(); else ShowBrowsePage((OverlayBrowsePage)(index - 1)); };
-            tabs.AddView(tab, new LinearLayout.LayoutParams(0, Dp(34), 1) { LeftMargin = Dp(1), RightMargin = Dp(1) });
+            tabs.AddView(tab, new LinearLayout.LayoutParams(0, Touch(), 1) { LeftMargin = Dp(1), RightMargin = Dp(1) });
             browseTabs.Add(tab);
         }
         panel.AddView(tabs, new LinearLayout.LayoutParams(-1, -2) { BottomMargin = Dp(6) });
@@ -1082,15 +1257,15 @@ public sealed partial class OverlayController : IDisposable
         controlPanel.AddView(playbackModeView, new LinearLayout.LayoutParams(-1, -2));
         // Keep position confirmation accessible above the scrollable controls.
         var confirmPosition = new Button(context) { Text = "确认当前句", TextSize = FontSize(12), ContentDescription = "确认播放器当前句与游戏一致，不会采用未选择的 OCR 结果" };
-        PgrTheme.StyleButton(confirmPosition, primary: true);
+        StyleControl(confirmPosition, primary: true);
         confirmPosition.SetPadding(Dp(3), Dp(5), Dp(3), Dp(5));
-        confirmPosition.SetMinHeight(Dp(44)); confirmPosition.SetMinimumHeight(Dp(44));
+        confirmPosition.SetMinHeight(Touch()); confirmPosition.SetMinimumHeight(Touch());
         confirmPosition.Click += (_, _) =>
         {
             actionScroll?.ScrollTo(0, 0);
             Command?.Invoke(OverlayCommand.ConfirmPosition);
         };
-        controlPanel.AddView(confirmPosition, new LinearLayout.LayoutParams(-1, Dp(44)) { LeftMargin = Dp(2), RightMargin = Dp(2), BottomMargin = Dp(8) });
+        controlPanel.AddView(confirmPosition, new LinearLayout.LayoutParams(-1, Touch()) { LeftMargin = Dp(2), RightMargin = Dp(2), BottomMargin = Dp(8) });
         RefreshPlaybackMode();
         var scroll = new ScrollView(context) { FillViewport = false, VerticalScrollBarEnabled = true };
         actionScroll = scroll;
@@ -1099,9 +1274,16 @@ public sealed partial class OverlayController : IDisposable
         controlPanel.AddView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         autoPlaybackPausedCard = new LinearLayout(context) { Orientation = Orientation.Vertical };
         autoPlaybackPausedCard.SetPadding(Dp(10), Dp(9), Dp(10), Dp(9));
-        autoPlaybackPausedCard.Background = PgrTheme.Surface(context, PgrTheme.Selection, PgrTheme.Red, PgrTheme.Red);
+        autoPlaybackPausedCard.Background = PgrTheme.Plate(context, Color.Argb(235, PgrTheme.Selection.R, PgrTheme.Selection.G, PgrTheme.Selection.B),
+            PgrTheme.SelectionLine, PgrTheme.CutMedium, Corners.Diagonal, PgrTheme.Red, AccentEdge.Left, brackets: PgrTheme.Red);
         actionRows.AddView(autoPlaybackPausedCard, new LinearLayout.LayoutParams(-1, -2) { BottomMargin = Dp(8) });
         RefreshAutoPlaybackPaused();
+        gameEndWaitCard = new LinearLayout(context) { Orientation = Orientation.Vertical };
+        gameEndWaitCard.SetPadding(Dp(12), Dp(9), Dp(12), Dp(9));
+        gameEndWaitCard.Background = FusionDeco.Over(PgrTheme.Plate(context, PgrTheme.A(Color.ParseColor("#FBF7EC"), 245), PgrArt.GoldLine, PgrTheme.CutMedium, Corners.Diagonal, PgrArt.GoldLine, AccentEdge.Left),
+            new FusionDeco(context.Resources!.DisplayMetrics!.Density, DecoTier.M) { CutTL = PgrTheme.CutMedium, CutBR = PgrTheme.CutMedium });
+        actionRows.AddView(gameEndWaitCard, new LinearLayout.LayoutParams(-1, -2) { BottomMargin = Dp(8) });
+        RefreshGameEndWaiting();
         var compactOptions = new LinearLayout(context) { Orientation = Orientation.Horizontal };
         compactButtonsButton = BrowsePagingButton("小按钮：开", () =>
         {
@@ -1115,25 +1297,50 @@ public sealed partial class OverlayController : IDisposable
             SetExpanded(false);
         });
         foreach (var button in new[] { compactButtonsButton, compactControlsButton })
-            compactOptions.AddView(button, new LinearLayout.LayoutParams(0, Dp(36), 1) { LeftMargin = Dp(1), RightMargin = Dp(1) });
+            compactOptions.AddView(button, new LinearLayout.LayoutParams(0, Touch(), 1) { LeftMargin = Dp(1), RightMargin = Dp(1) });
         actionRows.AddView(compactOptions, new LinearLayout.LayoutParams(-1, -2) { BottomMargin = Dp(5) });
         statusView = new TextView(context) { Text = status, TextSize = FontSize(12) };
-        statusView.SetTextColor(playbackPaused ? PgrTheme.Secondary : PgrTheme.Foreground);
-        statusView.SetPadding(Dp(3), 0, Dp(3), Dp(8));
+        StyleStatus(statusView, status, playbackPaused);
         statusView.SetLineSpacing(Dp(2), 1);
         statusView.SetMaxLines(3);
         statusView.Ellipsize = global::Android.Text.TextUtils.TruncateAt.End;
         actionRows.AddView(statusView, new LinearLayout.LayoutParams(-1, -2));
+        if (wideConsole)
+        {
+            // 15-B2 console: the same 13 keys as a 3 × 5 grid on the right; confirm / status / options in a left column.
+            AddRow(actionRows, true, false, ("上一句", OverlayCommand.Previous), ("重播", OverlayCommand.Replay), ("下一句", OverlayCommand.Next),
+                (playbackPaused ? "继续" : "暂停", OverlayCommand.Pause), ("原声", OverlayCommand.Original));
+            AddRow(actionRows, false, false, (autoPlaying ? "停止自动" : "自动播放", OverlayCommand.AutoPlay),
+                (clickFollowing ? "停止点按" : "点按跟随", OverlayCommand.ClickFollow), ("下一句区域", OverlayCommand.AdvanceRegion), ("识别定位", OverlayCommand.Ocr), ("分支", OverlayCommand.Branch));
+            AddRow(actionRows, false, false, ("历史", OverlayCommand.History), ("章节", OverlayCommand.Chapters), ("反馈这句", OverlayCommand.Feedback));
+            controlPanel.RemoveView(playbackModeView); controlPanel.RemoveView(confirmPosition);
+            actionRows.RemoveView(autoPlaybackPausedCard); actionRows.RemoveView(gameEndWaitCard); actionRows.RemoveView(compactOptions); actionRows.RemoveView(statusView);
+            var leftScroll = new ScrollView(context) { VerticalScrollBarEnabled = false };
+            var left = new LinearLayout(context) { Orientation = Orientation.Vertical };
+            leftScroll.AddView(left, new ScrollView.LayoutParams(-1, -2));
+            left.AddView(playbackModeView, new LinearLayout.LayoutParams(-1, -2));
+            left.AddView(confirmPosition, new LinearLayout.LayoutParams(-1, Touch()) { BottomMargin = Dp(6) });
+            left.AddView(autoPlaybackPausedCard, new LinearLayout.LayoutParams(-1, -2) { BottomMargin = Dp(6) });
+            left.AddView(gameEndWaitCard, new LinearLayout.LayoutParams(-1, -2) { BottomMargin = Dp(6) });
+            left.AddView(compactOptions, new LinearLayout.LayoutParams(-1, -2) { BottomMargin = Dp(4) });
+            left.AddView(statusView, new LinearLayout.LayoutParams(-1, -2));
+            controlPanel.Orientation = Orientation.Horizontal;
+            controlPanel.AddView(leftScroll, 0, new LinearLayout.LayoutParams(ReadDp(250), -1) { RightMargin = ReadDp(8) });
+            scroll.LayoutParameters = new LinearLayout.LayoutParams(0, -1, 1);
+        }
+        else
+        {
         AddRow(actionRows, false, false, (autoPlaying ? "停止自动" : "自动播放", OverlayCommand.AutoPlay),
             (clickFollowing ? "停止点按" : "点按跟随", OverlayCommand.ClickFollow), ("下一句区域", OverlayCommand.AdvanceRegion));
         AddRow(actionRows, true, false, ("上一句", OverlayCommand.Previous), ("重播", OverlayCommand.Replay), ("下一句", OverlayCommand.Next));
         AddRow(actionRows, false, false, (playbackPaused ? "继续" : "暂停", OverlayCommand.Pause), ("分支", OverlayCommand.Branch), ("原声", OverlayCommand.Original));
         AddRow(actionRows, false, false, ("识别定位", OverlayCommand.Ocr), ("历史", OverlayCommand.History), ("章节", OverlayCommand.Chapters));
         AddRow(actionRows, false, false, ("反馈这句", OverlayCommand.Feedback));
+        }
         browseShell = new LinearLayout(context) { Orientation = Orientation.Horizontal, Visibility = ViewStates.Gone };
         var sidebar = new LinearLayout(context) { Orientation = Orientation.Vertical };
         sidebar.SetPadding(ReadDp(3), ReadDp(4), ReadDp(3), ReadDp(4));
-        sidebar.Background = PgrTheme.Surface(context, PgrTheme.Panel, PgrTheme.Border);
+        sidebar.Background = PgrTheme.Plate(context, PgrTheme.GlassRaised, null, PgrTheme.CutSmall, Corners.BottomRight);
         var sideScroll = new ScrollView(context) { VerticalScrollBarEnabled = false };
         var sideItems = new LinearLayout(context) { Orientation = Orientation.Vertical };
         sideScroll.AddView(sideItems, new ScrollView.LayoutParams(-1, -2));
@@ -1144,26 +1351,29 @@ public sealed partial class OverlayController : IDisposable
             int index = i;
             var tab = ReadingButton(tabLabels[i], () => { if (index == 0) ShowControlPage(); else ShowBrowsePage((OverlayBrowsePage)(index - 1)); });
             tab.ContentDescription = "悬浮" + tabLabels[i] + "页";
-            sideItems.AddView(tab, new LinearLayout.LayoutParams(-1, ReadDp(38)) { BottomMargin = ReadDp(2) });
+            sideItems.AddView(tab, new LinearLayout.LayoutParams(-1, Touch()) { BottomMargin = ReadDp(2) });
             browseSideTabs.Add(tab);
         }
         var collapse = ReadingButton("收起", () => SetExpanded(false));
-        sidebar.AddView(collapse, new LinearLayout.LayoutParams(-1, ReadDp(34)));
-        browseShell.AddView(sidebar, new LinearLayout.LayoutParams(ReadDp(54), -1));
+        sidebar.AddView(collapse, new LinearLayout.LayoutParams(-1, Touch()));
+        browseShell.AddView(sidebar, new LinearLayout.LayoutParams(ReadDp(60), -1));
         browsePanel = new LinearLayout(context) { Orientation = Orientation.Vertical };
         browsePanel.SetPadding(ReadDp(8), ReadDp(3), ReadDp(5), ReadDp(3));
+        // 15-B2 reader: cold-white paper reading area inside the dark L frame.
+        browsePanel.Background = FusionDeco.Over(PgrTheme.Plate(context, Color.Argb(248, 0xF2, 0xF3, 0xF5), null, PgrTheme.CutSmall, Corners.BottomRight), new FusionDeco(context.Resources!.DisplayMetrics!.Density, DecoTier.S) { CutBR = PgrTheme.CutSmall });
         var readHeader = new LinearLayout(context) { Orientation = Orientation.Horizontal };
         readHeader.SetGravity(GravityFlags.CenterVertical);
         browseHeading = new TextView(context) { Text = "台词", TextSize = 13, Gravity = GravityFlags.CenterVertical,
             ContentDescription = "阅读面板标题，按住拖动" };
-        browseHeading.SetTextColor(PgrTheme.Secondary); browseHeading.SetSingleLine(true);
+        browseHeading.SetTextColor(PgrTheme.Steel); browseHeading.SetSingleLine(true);
+        browseHeading.SetTypeface(PgrTheme.SansMedium, TypefaceStyle.Normal); browseHeading.LetterSpacing = .04f;
         browseHeading.Ellipsize = global::Android.Text.TextUtils.TruncateAt.End;
         browseHeading.SetOnTouchListener(new DragListener(this, false));
         readHeader.AddView(browseHeading, new LinearLayout.LayoutParams(0, -1, 1));
         var closeReading = ReadingButton("收回", ShowControlPage);
         closeReading.ContentDescription = "收回阅读面板，返回控制页";
-        readHeader.AddView(closeReading, new LinearLayout.LayoutParams(ReadDp(48), -1));
-        browsePanel.AddView(readHeader, new LinearLayout.LayoutParams(-1, ReadDp(30)) { BottomMargin = ReadDp(3) });
+        readHeader.AddView(closeReading, new LinearLayout.LayoutParams(ReadDp(64), -1));
+        browsePanel.AddView(readHeader, new LinearLayout.LayoutParams(-1, Touch()) { BottomMargin = ReadDp(3) });
         browseScroll = new ScrollView(context) { FillViewport = false, VerticalScrollBarEnabled = true };
         browseRows = new LinearLayout(context) { Orientation = Orientation.Vertical };
         browseScroll.AddView(browseRows, new ScrollView.LayoutParams(-1, -2));
@@ -1173,14 +1383,32 @@ public sealed partial class OverlayController : IDisposable
         browseCurrent = ReadingButton("回当前句", () => { if (browseModel != null) { browsePageIndex = SelectedBrowsePage(browseModel); RenderBrowse(); } });
         browseNext = ReadingButton("下一页", () => { browsePageIndex++; RenderBrowse(preferSelected: false); });
         foreach (var button in new[] { browsePrevious, browseCurrent, browseNext })
-            pagination.AddView(button, new LinearLayout.LayoutParams(0, ReadDp(32), 1) { LeftMargin = ReadDp(1), RightMargin = ReadDp(1) });
+            pagination.AddView(button, new LinearLayout.LayoutParams(0, Touch(), 1) { LeftMargin = ReadDp(1), RightMargin = ReadDp(1) });
         browsePanel.AddView(pagination, new LinearLayout.LayoutParams(-1, -2) { TopMargin = ReadDp(2) });
         browseShell.AddView(browsePanel, new LinearLayout.LayoutParams(0, -1, 1));
         RenderBrowse();
-        var divider = new View(context); divider.SetBackgroundColor(PgrTheme.Border);
+        var divider = new View(context); divider.SetBackgroundColor(PgrTheme.GlassLine);
         panel.AddView(divider, new LinearLayout.LayoutParams(-1, Math.Max(1, Dp(.5f))) { TopMargin = Dp(6), BottomMargin = Dp(2) });
         // Keep collapse/hide accessible even when a landscape screen makes the actions scroll.
-        AddRow(panel, false, true, ("主界面", OverlayCommand.OpenApp), ("收起", null), ("隐藏", OverlayCommand.Hide));
+        if (wideConsole)
+        {
+            // 15-B2: tabs and 主界面 / 收起 / 隐藏 merged into the dark title row; the dot-grip title is the drag handle (same DragListener).
+            panel.RemoveView(tabs); panel.RemoveView(divider);
+            consoleHeader = new LinearLayout(context) { Orientation = Orientation.Horizontal, Visibility = ViewStates.Gone };
+            consoleHeader.SetGravity(GravityFlags.CenterVertical);
+            var grip = new TextView(context) { Text = "⋮⋮ 配音控制", TextSize = 13, Gravity = GravityFlags.CenterVertical, ContentDescription = "配音控制，点击收起，按住拖动" };
+            grip.SetTextColor(Color.White); grip.SetTypeface(PgrTheme.SansBold, TypefaceStyle.Bold); grip.SetSingleLine(true);
+            grip.SetPadding(ReadDp(10), 0, ReadDp(6), 0);
+            grip.SetOnTouchListener(new DragListener(this));
+            consoleHeader.AddView(grip, new LinearLayout.LayoutParams(-2, -1));
+            consoleHeader.AddView(tabs, new LinearLayout.LayoutParams(0, -1, 1));
+            var tools = new LinearLayout(context) { Orientation = Orientation.Horizontal };
+            AddRow(tools, false, true, ("主界面", OverlayCommand.OpenApp), ("收起", null), ("隐藏", OverlayCommand.Hide));
+            consoleHeader.AddView(tools, new LinearLayout.LayoutParams(ReadDp(300), -1) { LeftMargin = ReadDp(4) });
+            root.AddView(consoleHeader, new LinearLayout.LayoutParams(-1, Touch() + ReadDp(4)));
+        }
+        else AddRow(panel, false, true, ("主界面", OverlayCommand.OpenApp), ("收起", null), ("隐藏", OverlayCommand.Hide));
+        panel.Background = FusionDeco.Over(PgrTheme.Plate(context, Color.Argb(248, 0xF2, 0xF3, 0xF5), null, PgrTheme.CutSmall, Corners.BottomRight), new FusionDeco(context.Resources!.DisplayMetrics!.Density, DecoTier.M) { CutBR = PgrTheme.CutSmall });
         root.AddView(panel, new LinearLayout.LayoutParams(-1, 0, 1));
         root.AddView(browseShell, new LinearLayout.LayoutParams(-1, 0, 1));
         parameters = new WindowManagerLayoutParams(Dp(58), Dp(58),
@@ -1193,11 +1421,19 @@ public sealed partial class OverlayController : IDisposable
         UpdateSize();
     }
 
+    /// <summary>16-C: visible choiceActionLabel「确认并继续配音 ›」at a card's lower right.</summary>
+    private TextView ActionHint(string label)
+    {
+        var hint = new TextView(context) { Text = label + " ›", TextSize = 11, Gravity = GravityFlags.End, ImportantForAccessibility = ImportantForAccessibility.No };
+        hint.SetTextColor(PgrTheme.RedText); hint.SetTypeface(PgrTheme.SansBold, TypefaceStyle.Bold); hint.SetSingleLine(true);
+        return hint;
+    }
+
     private Button BrowsePagingButton(string label, Action action)
     {
         var button = new Button(context) { Text = label, TextSize = FontSize(10), ContentDescription = label };
-        PgrTheme.StyleButton(button, quiet: true);
-        button.SetMinHeight(Dp(34)); button.SetMinimumHeight(Dp(34));
+        StyleControl(button, quiet: true);
+        button.SetMinHeight(Touch()); button.SetMinimumHeight(Touch());
         button.SetPadding(Dp(2), Dp(2), Dp(2), Dp(2));
         button.Click += (_, _) => action();
         return button;
@@ -1206,9 +1442,9 @@ public sealed partial class OverlayController : IDisposable
     private Button ReadingButton(string label, Action action)
     {
         var button = new Button(context) { Text = label, TextSize = 12, ContentDescription = label };
-        PgrTheme.StyleButton(button, quiet: true);
+        StyleControl(button, quiet: true);
         button.SetSingleLine(true); button.Ellipsize = global::Android.Text.TextUtils.TruncateAt.End;
-        button.SetMinHeight(ReadDp(28)); button.SetMinimumHeight(ReadDp(28));
+        button.SetMinHeight(Touch()); button.SetMinimumHeight(Touch());
         button.SetPadding(ReadDp(5), ReadDp(2), ReadDp(5), ReadDp(2));
         button.Click += (_, _) => action();
         return button;
@@ -1216,18 +1452,20 @@ public sealed partial class OverlayController : IDisposable
 
     private void AddRow(LinearLayout container, bool playbackRow, bool footer, params (string Label, OverlayCommand? Action)[] actions)
     {
-        var row = new LinearLayout(context) { Orientation = Orientation.Horizontal };
+        var row = new LinearLayout(context) { Orientation = Orientation.Horizontal, BaselineAligned = false };
         foreach (var item in actions)
         {
             var button = new Button(context) { Text = item.Label, TextSize = FontSize(11) };
-            PgrTheme.StyleButton(button, primary: playbackRow && item.Action == OverlayCommand.Replay || autoPlaying && item.Action == OverlayCommand.AutoPlay || clickFollowing && item.Action == OverlayCommand.ClickFollow, quiet: footer);
+            StyleControl(button, primary: playbackRow && item.Action == OverlayCommand.Replay || autoPlaying && item.Action == OverlayCommand.AutoPlay || clickFollowing && item.Action == OverlayCommand.ClickFollow, quiet: footer);
             button.SetPadding(Dp(3), Dp(footer ? 3 : 7), Dp(3), Dp(footer ? 3 : 7));
-            button.SetMinHeight(Dp(44));
-            button.SetMinimumHeight(Dp(44));
+            button.SetMinHeight(Touch());
+            button.SetMinimumHeight(Touch());
             button.ContentDescription = item.Action == OverlayCommand.OpenApp ? "打开主界面" : item.Label;
-            var icon = Icon(IconName(item.Action), footer ? 15 : playbackRow ? 24 : 20, footer ? PgrTheme.Secondary : PgrTheme.Foreground);
+            bool onDark = footer && wideConsole && ReferenceEquals(container.Parent, consoleHeader) == false && container != panel;
+            var icon = Icon(IconName(item.Action), footer ? 15 : wideConsole ? 17 : playbackRow ? 24 : 20, onDark ? PgrTheme.A(Color.White, 200) : footer ? PgrTheme.Secondary : PgrTheme.Foreground);
+            if (onDark) { button.SetTextColor(PgrTheme.A(Color.White, 215)); button.SetSingleLine(true); button.SetPadding(ReadDp(2), 0, ReadDp(2), 0); }
             button.CompoundDrawablePadding = Dp(footer ? 5 : 4);
-            if (footer) button.SetCompoundDrawablesWithIntrinsicBounds(icon, null, null, null);
+            if (footer || wideConsole) button.SetCompoundDrawablesWithIntrinsicBounds(icon, null, null, null);
             else button.SetCompoundDrawablesWithIntrinsicBounds(null, icon, null, null);
             if (item.Action == OverlayCommand.Pause) pauseButton = button;
             if (item.Action == OverlayCommand.AutoPlay)
@@ -1250,11 +1488,42 @@ public sealed partial class OverlayController : IDisposable
                 else if (action == OverlayCommand.Ocr) { ShowBrowsePage(OverlayBrowsePage.Locate); Command?.Invoke(action.Value); }
                 else Command?.Invoke(action.Value);
             };
-            row.AddView(button, new LinearLayout.LayoutParams(0, Dp(footer ? 44 : playbackRow ? 68 : 58), 1)
+            row.AddView(button, new LinearLayout.LayoutParams(0, wideConsole ? Touch() : Math.Max(Touch(), Dp(footer ? 44 : playbackRow ? 68 : 58)), 1)
                 { LeftMargin = Dp(2), RightMargin = Dp(2), TopMargin = Dp(footer ? 2 : 5) });
         }
-        container.AddView(row);
+        // Explicit fill width: a horizontal container (console header tools) would otherwise wrap the row and starve the weights.
+        container.AddView(row, new LinearLayout.LayoutParams(-1, -2));
     }
+
+    /// <summary>State icons must keep the placement AddRow chose: left of the label on the 48dp console keys, above it otherwise.</summary>
+    private void SetActionIcon(Button button, string name)
+    {
+        var icon = Icon(name, wideConsole ? 17 : 20);
+        if (wideConsole) button.SetCompoundDrawablesWithIntrinsicBounds(icon, null, null, null);
+        else button.SetCompoundDrawablesWithIntrinsicBounds(null, icon, null, null);
+    }
+
+    /// <summary>
+    /// Shared button sizing from <see cref="PgrTheme.StyleButton"/>, then the translucent overlay skin so the
+    /// game stays visible underneath. Geometry (min sizes, padding) is identical to the app buttons.
+    /// </summary>
+    private static void StyleControl(Button button, bool selected = false, bool primary = false, bool quiet = false, bool alignStart = false)
+    {
+        PgrTheme.StyleButton(button, selected, primary, quiet, alignStart);
+        if (quiet && !selected && !primary) return;
+        PgrTheme.StyleOverlayButton(button, primary ? PgrTheme.OverlayTone.Primary : selected ? PgrTheme.OverlayTone.Selected : PgrTheme.OverlayTone.Glass);
+    }
+
+    /// <summary>
+    /// Floating ball: dark glass plate with a crimson base tick and HUD brackets. Expanded header and compact
+    /// strip use a lighter glass with the crimson signal bar. Only the drawable changes; sizes stay as before.
+    /// </summary>
+    private Android.Graphics.Drawables.Drawable HandleBackground(bool expanded, bool compact) => expanded
+        ? PgrTheme.Plate(context, PgrTheme.GlassRaised, null, PgrTheme.CutSmall, Corners.BottomRight, PgrTheme.Red, AccentEdge.Left)
+        : compact
+            ? PgrTheme.Plate(context, PgrTheme.GlassStrong, PgrTheme.GlassLine, PgrTheme.CutSmall, Corners.BottomRight, PgrTheme.Red, AccentEdge.Left)
+            : PgrTheme.Plate(context, PgrTheme.GlassStrong, PgrTheme.GlassLine, PgrTheme.CutMedium, Corners.Diagonal, PgrTheme.Red, AccentEdge.Bottom,
+                accentLength: 18, sheen: PgrTheme.SheenLight);
 
     private PgrIconDrawable Icon(string name, int size = 20, Color? color = null) => new(name, color ?? PgrTheme.Foreground, density * uiScale, size);
     private string IconName(OverlayCommand? command) => command switch
@@ -1265,9 +1534,11 @@ public sealed partial class OverlayController : IDisposable
         OverlayCommand.OpenApp => "open", OverlayCommand.History => "history", OverlayCommand.Chapters => "archive",
         OverlayCommand.AutoPlay => autoPlaying ? "pause" : "play", OverlayCommand.AdvanceRegion => "locate",
         OverlayCommand.ClickFollow => clickFollowing ? "pause" : "locate",
-        OverlayCommand.Hide => "close", _ => "chevron_up"
+        OverlayCommand.Hide => "close", OverlayCommand.Feedback => "feedback", _ => "chevron_up"
     };
     private int Dp(float value) => (int)(value * density * uiScale + 0.5f);
+    /// <summary>SPEC C.2: touch targets stay ≥ 48dp even when the short-landscape uiScale shrinks everything else.</summary>
+    private int Touch(float value = 48) => Math.Max(ReadDp(48), Dp(value));
     private int ReadDp(float value) => (int)(value * density + .5f);
     private float FontSize(float value) => value * Math.Max(.85f, uiScale);
     private void OnMain(Action action)
@@ -1279,10 +1550,12 @@ public sealed partial class OverlayController : IDisposable
     {
         if (parameters == null) return;
         UpdateSize();
+        ApplyRememberedPlacement();
         var safe = ScreenArea();
         parameters.X = Math.Clamp(parameters.X, safe.Left, Math.Max(safe.Left, safe.Right - parameters.Width));
         parameters.Y = Math.Clamp(parameters.Y, safe.Top, Math.Max(safe.Top, safe.Bottom - parameters.Height));
         UpdateLayout();
+        RepositionExplorePanel();
     }
     private void UpdateSize()
     {
@@ -1298,10 +1571,33 @@ public sealed partial class OverlayController : IDisposable
         }
         bool compact = compactControlsVisible && !appForeground;
         bool reading = expanded && browsePage.HasValue;
-        int readWidth = ReadDp(screenWidth > screenHeight && screenHeight / density < 450 ? 486 : 456);
-        parameters.Width = Math.Min(reading ? readWidth : expanded ? Dp(300) : compact ? Dp(180) : Dp(58), screenWidth);
-        int desiredHeight = reading ? ReadDp(440) : expanded ? Dp(444) : compact ? Dp(compactButtonsVisible ? 98 : 66) : Dp(58);
+        int readWidth = ReadDp(wideConsole ? 500 : 456);
+        int barHeight = compactButtonsVisible ? Dp(26) + Dp(30) + Touch() + Dp(16) : Dp(66);
+        parameters.Width = Math.Min(reading ? readWidth : expanded ? (wideConsole ? ReadDp(820) : Dp(300)) : compact ? (wideConsole ? ReadDp(580) : Dp(180)) : Dp(58), screenWidth);
+        int desiredHeight = reading ? ReadDp(wideConsole ? 360 : 440) : expanded ? (wideConsole ? ReadDp(250) : Dp(444)) : compact ? (wideConsole ? SlimBarHeight() : barHeight) : Dp(58);
         parameters.Height = Math.Min(desiredHeight, Math.Max(1, (int)(screenHeight * (reading ? .9f : expanded ? .82f : 1))));
+    }
+    /// <summary>横屏台词条（方案 1）平时 46dp；点台词看全文时按实际行数加高，换句、展开或重建后回到一行。</summary>
+    private bool slimLineFull;
+    private int SlimBarHeight()
+    {
+        int slim = ReadDp(46);
+        if (!slimLineFull || currentLineView is not { Width: > 0 } line) return slim;
+        line.Measure(View.MeasureSpec.MakeMeasureSpec(line.Width, MeasureSpecMode.Exactly), View.MeasureSpec.MakeMeasureSpec(0, MeasureSpecMode.Unspecified));
+        return slim + Math.Max(0, line.MeasuredHeight + Dp(8) - ReadDp(38));
+    }
+    private void ToggleSlimLine()
+    {
+        if (disposed || !wideConsole || expanded || currentLineView == null) return;
+        slimLineFull = !slimLineFull;
+        currentLineView.SetMaxLines(slimLineFull ? 4 : 1);
+        ClampPosition();
+    }
+    private void CollapseSlimLine()
+    {
+        if (!slimLineFull) return;
+        slimLineFull = false;
+        currentLineView?.SetMaxLines(1);
     }
     private (int Left, int Top, int Right, int Bottom) ScreenArea()
     {
@@ -1339,7 +1635,7 @@ public sealed partial class OverlayController : IDisposable
         {
             BuildView();
             if (parameters != null) { parameters.X = x; parameters.Y = y; }
-            if (restore) { windows.AddView(root, parameters); showing = true; ClampPosition(); }
+            if (restore) { windows.AddView(root, parameters); showing = true; PromptBarEpoch++; ClampPosition(); }
         }
         catch (Exception ex) { showing = false; Error?.Invoke("调整悬浮窗口未完成：" + ex.Message); }
     });
@@ -1350,7 +1646,7 @@ public sealed partial class OverlayController : IDisposable
     }
     private void HideCore(bool immediate = false, bool preserveCaptureRound = false)
     {
-        ClearBranchEntered();
+        ClearBranchEntered(); ClearPromptBarCore(); PromptBarEpoch++;
         ClearDefaultBranchWait();
         DismissConfirmation();
         if (preserveCaptureRound) captureCancelGesture.ResetPresentation();
@@ -1362,7 +1658,7 @@ public sealed partial class OverlayController : IDisposable
     public void Dispose() => OnMain(() =>
     {
         if (disposed) return;
-        disposed = true; HideCore();
+        disposed = true; HideCore(); ClearPromptBarCore();
         displays?.UnregisterDisplayListener(displayListener);
         context.UnregisterComponentCallbacks(configurationListener);
         displayListener.Dispose(); configurationListener.Dispose();
@@ -1468,6 +1764,7 @@ public sealed partial class OverlayController : IDisposable
                     return true;
                 case MotionEventActions.Up:
                     if (!dragged) { view?.PerformClick(); if (toggleOnTap) owner.SetExpanded(!owner.expanded); }
+                    else owner.SaveCurrentPlacement();
                     return true;
                 case MotionEventActions.Cancel: return true;
                 default: return false;

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Mirror of Ui/PgrTheme.cs tokens (palette C1 冷灰白) for the platform theme and the launcher icon. Code-built views read PgrTheme. -->
+<resources>
+  <color name="pgr_void">#E8EBEE</color>
+  <color name="pgr_header_start">#DDE2E7</color>
+  <color name="pgr_header_end">#F2F3F5</color>
+  <color name="pgr_background">#F2F3F5</color>
+  <color name="pgr_panel">#B8FFFFFF</color>
+  <color name="pgr_raised">#E0FFFFFF</color>
+  <color name="pgr_pressed">#DDE2E7</color>
+  <color name="pgr_border">#CBD1D7</color>
+  <color name="pgr_border_strong">#AEB6BF</color>
+  <color name="pgr_text">#1D232A</color>
+  <color name="pgr_text_secondary">#4B5560</color>
+  <color name="pgr_text_muted">#5C6670</color>
+  <color name="pgr_red">#A3283A</color>
+  <color name="pgr_red_text">#9C2536</color>
+  <color name="pgr_red_fill">#A3283A</color>
+  <color name="pgr_red_deep">#6E1B28</color>
+  <color name="pgr_red_ripple">#46A3283A</color>
+  <color name="pgr_text_highlight">#6EA3283A</color>
+  <color name="pgr_selection">#F6E9EB</color>
+  <color name="pgr_selection_line">#D9AEB5</color>
+  <color name="pgr_steel">#44607D</color>
+  <color name="pgr_slate">#4F6B8A</color>
+  <color name="pgr_cyan">#3E7C7A</color>
+  <color name="pgr_teal_text">#356C6A</color>
+  <color name="pgr_brass">#B08A3E</color>
+  <color name="pgr_brass_text">#7E6128</color>
+  <color name="pgr_ice">#FFFFFF</color>
+  <color name="pgr_name_plate">#2A3139</color>
+  <color name="pgr_on_plate">#F2F3F5</color>
+  <color name="pgr_red_glow">#46A3283A</color>
+  <color name="pgr_cyan_glow">#3C3E7C7A</color>
+  <color name="pgr_card_shadow">#261D232A</color>
+  <color name="pgr_ink">#1D232A</color>
+  <color name="pgr_on_accent">#FFFFFF</color>
+  <color name="pgr_shade">#000000</color>
+  <color name="pgr_top_light">#DDE2E7</color>
+  <color name="pgr_tab_selected">#EBFFFFFF</color>
+  <!-- Bottom navigation plate & script list -->
+  <color name="pgr_name_plate_light">#38414C</color>
+  <color name="pgr_nav_text">#C3CBD4</color>
+  <color name="pgr_nav_sub">#AAB4BF</color>
+  <color name="pgr_mist_tint">#0E4F6B8A</color>
+  <color name="pgr_brass_tint">#22B08A3E</color>
+</resources>

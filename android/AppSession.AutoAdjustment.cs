@@ -27,7 +27,7 @@ public sealed partial class AppSession
         {
             Invalidate(); audio.Stop(); action(engine);
             for (int i = 0; i < merges && engine.Mode == RunMode.Merge; i++) engine.Next();
-            if (engine.CurrentId != probe.CurrentId || !(Settings.AutoPlayConfirmBranch
+            if (engine.CurrentId != probe.CurrentId || !(Settings.AutoPlayConfirmBranch && !DefaultBranchPolicy.IsSingleOptionMenu(engine)
                 ? BeginConfirmedBranchWait(engine, target, key) : BeginDefaultBranchWait(engine, target, key)))
             { Status = "这处分支暂不能使用默认路线，请按游戏画面核对。"; Notify(); }
             return true;

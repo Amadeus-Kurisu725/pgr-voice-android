@@ -1,0 +1,219 @@
+{
+ "schemaVersion": 3,
+ "id": "synthetic-empty-loop",
+ "title": "【测试夹具·合成】空回环菜单",
+ "chapters": [
+  {
+   "id": "syn",
+   "title": "合成章节",
+   "sections": [
+    {
+     "id": "syn-sec",
+     "title": "S-1 合成小节",
+     "startId": "syn-sec-l0"
+    }
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "id": "syn-sec-l0",
+   "sectionId": "syn-sec",
+   "kind": "line",
+   "pathId": "syn-sec-main",
+   "speaker": "指挥官",
+   "text": "营地里很安静。",
+   "rawText": "营地里很安静。",
+   "nextId": "syn-sec-menu",
+   "audioStatus": "not-found"
+  },
+  {
+   "id": "syn-sec-menu",
+   "sectionId": "syn-sec",
+   "kind": "choice",
+   "pathId": "syn-sec-main",
+   "text": "选择路线",
+   "menuType": "exclusive",
+   "nextId": "syn-sec-menu-merge",
+   "options": [
+    {
+     "id": "syn-sec-route-e",
+     "label": "再等等……",
+     "targetId": "syn-sec-e-ret",
+     "pathId": "syn-sec-route-e",
+     "returnId": "syn-sec-menu",
+     "mergeId": "syn-sec-menu-merge",
+     "verified": true,
+     "requires": [],
+     "excludes": [],
+     "conditionNote": "",
+     "lineIds": [],
+     "evidence": [
+      "synthetic"
+     ],
+     "previousVerified": true,
+     "bodyVerified": true,
+     "exitVerified": true,
+     "segmentIds": [
+      "syn-sec-e-ret"
+     ],
+     "boundaryId": null,
+     "bodyEvidence": [
+      "synthetic"
+     ],
+     "exitEvidence": [
+      "synthetic"
+     ]
+    },
+    {
+     "id": "syn-sec-route-n",
+     "label": "聊聊",
+     "targetId": "syn-sec-n1",
+     "pathId": "syn-sec-route-n",
+     "returnId": "syn-sec-menu",
+     "mergeId": "syn-sec-menu-merge",
+     "verified": true,
+     "requires": [],
+     "excludes": [],
+     "conditionNote": "",
+     "lineIds": [
+      "syn-sec-n1",
+      "syn-sec-n2"
+     ],
+     "evidence": [
+      "synthetic"
+     ],
+     "previousVerified": true,
+     "bodyVerified": true,
+     "exitVerified": true,
+     "segmentIds": [
+      "syn-sec-n1",
+      "syn-sec-n2",
+      "syn-sec-n-ret"
+     ],
+     "boundaryId": null,
+     "bodyEvidence": [
+      "synthetic"
+     ],
+     "exitEvidence": [
+      "synthetic"
+     ]
+    },
+    {
+     "id": "syn-sec-route-x",
+     "label": "离开营地",
+     "targetId": "syn-sec-x1",
+     "pathId": "syn-sec-route-x",
+     "returnId": "syn-sec-menu-merge",
+     "mergeId": "syn-sec-menu-merge",
+     "verified": true,
+     "requires": [],
+     "excludes": [],
+     "conditionNote": "",
+     "lineIds": [
+      "syn-sec-x1"
+     ],
+     "evidence": [
+      "synthetic"
+     ],
+     "previousVerified": true,
+     "bodyVerified": true,
+     "exitVerified": true,
+     "segmentIds": [
+      "syn-sec-x1",
+      "syn-sec-x-ret"
+     ],
+     "boundaryId": null,
+     "bodyEvidence": [
+      "synthetic"
+     ],
+     "exitEvidence": [
+      "synthetic"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "syn-sec-e-ret",
+   "sectionId": "syn-sec",
+   "kind": "return",
+   "pathId": "syn-sec-route-e",
+   "text": "",
+   "nextId": "syn-sec-menu",
+   "completeRoute": "syn-sec-route-e",
+   "setFacts": []
+  },
+  {
+   "id": "syn-sec-n1",
+   "sectionId": "syn-sec",
+   "kind": "line",
+   "pathId": "syn-sec-route-n",
+   "speaker": "指挥官",
+   "text": "要聊点什么吗？",
+   "rawText": "要聊点什么吗？",
+   "nextId": "syn-sec-n2",
+   "audioStatus": "not-found"
+  },
+  {
+   "id": "syn-sec-n2",
+   "sectionId": "syn-sec",
+   "kind": "line",
+   "pathId": "syn-sec-route-n",
+   "speaker": "丽芙",
+   "text": "就说说今天吧。",
+   "rawText": "就说说今天吧。",
+   "nextId": "syn-sec-n-ret",
+   "audioStatus": "not-found"
+  },
+  {
+   "id": "syn-sec-n-ret",
+   "sectionId": "syn-sec",
+   "kind": "return",
+   "pathId": "syn-sec-route-n",
+   "text": "",
+   "nextId": "syn-sec-menu",
+   "completeRoute": "syn-sec-route-n",
+   "setFacts": []
+  },
+  {
+   "id": "syn-sec-x1",
+   "sectionId": "syn-sec",
+   "kind": "line",
+   "pathId": "syn-sec-route-x",
+   "speaker": "指挥官",
+   "text": "该出发了。",
+   "rawText": "该出发了。",
+   "nextId": "syn-sec-x-ret",
+   "audioStatus": "not-found"
+  },
+  {
+   "id": "syn-sec-x-ret",
+   "sectionId": "syn-sec",
+   "kind": "return",
+   "pathId": "syn-sec-route-x",
+   "text": "",
+   "nextId": "syn-sec-menu-merge",
+   "completeRoute": "syn-sec-route-x",
+   "setFacts": []
+  },
+  {
+   "id": "syn-sec-menu-merge",
+   "sectionId": "syn-sec",
+   "kind": "merge",
+   "pathId": "syn-sec-main",
+   "text": "返回共同线",
+   "nextId": "syn-sec-l9"
+  },
+  {
+   "id": "syn-sec-l9",
+   "sectionId": "syn-sec",
+   "kind": "line",
+   "pathId": "syn-sec-main",
+   "speaker": "指挥官",
+   "text": "一行人离开了营地。",
+   "rawText": "一行人离开了营地。",
+   "nextId": null,
+   "audioStatus": "not-found"
+  }
+ ]
+}
