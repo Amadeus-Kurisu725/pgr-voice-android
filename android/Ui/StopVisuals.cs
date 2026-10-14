@@ -12,6 +12,7 @@ namespace PgrVoice.AndroidApp.Ui;
 /// </summary>
 public sealed class CountdownRailDrawable : Drawable
 {
+    public override ConstantState? GetConstantState() => new SharedDrawableState(this);
     readonly Paint paint = new(PaintFlags.AntiAlias);
     readonly global::Android.Graphics.Path path = new();
     readonly float d;

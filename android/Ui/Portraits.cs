@@ -326,6 +326,7 @@ public static class BundledAvatars
 /// </summary>
 public sealed class PortraitFrameDrawable : Drawable
 {
+    public override ConstantState? GetConstantState() => new SharedDrawableState(this);
     readonly Paint paint = new(PaintFlags.AntiAlias | PaintFlags.FilterBitmap);
     readonly Path shape = new();
     readonly float d;
@@ -427,6 +428,7 @@ public sealed class PortraitFrameDrawable : Drawable
 /// </summary>
 public sealed class StandeeDrawable : Drawable
 {
+    public override ConstantState? GetConstantState() => new SharedDrawableState(this);
     readonly Paint paint = new(PaintFlags.AntiAlias | PaintFlags.FilterBitmap);
     readonly Paint fade = new(PaintFlags.AntiAlias);
     readonly float d;
@@ -465,6 +467,7 @@ public sealed class StandeeDrawable : Drawable
 /// </summary>
 public sealed class NamePlateDrawable : Drawable
 {
+    public override ConstantState? GetConstantState() => new SharedDrawableState(this);
     readonly Paint paint = new(PaintFlags.AntiAlias);
     readonly Path path = new();
     readonly float d;
@@ -489,6 +492,7 @@ public sealed class NamePlateDrawable : Drawable
 /// <summary>Thin rule under the name plate row: hairline across, small red square marker at the trailing end.</summary>
 public sealed class DialogueRuleDrawable : Drawable
 {
+    public override ConstantState? GetConstantState() => new SharedDrawableState(this);
     readonly Paint paint = new(PaintFlags.AntiAlias);
     readonly float d;
     public DialogueRuleDrawable(float density) => d = density;

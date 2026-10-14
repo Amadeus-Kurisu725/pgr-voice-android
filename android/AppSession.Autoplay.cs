@@ -320,9 +320,21 @@ public sealed partial class AppSession
     }
     void OnAutoAudioCompleted(long ticket)
     {
-        long epoch=autoPlay.Epoch;
-        if(!autoPlay.CompleteAudio(epoch,ticket,SystemClock.ElapsedRealtime()))return;
+        long epoch=autoPlay.Epoch,now=SystemClock.ElapsedRealtime();
+        if(!autoPlay.CompleteAudio(epoch,ticket,now))return;
         Diagnostics.Log("自动播放自然结束",$"node={autoPlay.NodeId}; audio={ticket}");
+        // 原配句的静音占位比游戏原声短时，等原声播完再点下一句，避免把原声切断。
+        string nodeId=autoPlay.NodeId;
+        if(playingNative&&nativeVoiceNode==nodeId&&nativeVoiceUntil>now&&autoPlay.HoldTapping(epoch,nodeId,nativeVoiceUntil))
+        {
+            Diagnostics.Log("自动播放等待原配",$"node={nodeId}; ms={nativeVoiceUntil-now}");
+            main.PostDelayed(()=>Post(()=>
+            {
+                if(autoPlay.Epoch!=epoch||autoPlay.Phase!=AutoPlaybackPhase.Tapping||autoPlay.NodeId!=nodeId||autoPlay.TapTicket!=0)return;
+                AdvanceAfterAutoLine(epoch);
+            }),nativeVoiceUntil-now);
+            return;
+        }
         AdvanceAfterAutoLine(epoch);
     }
     // 只将非空的纯标点正文当作停顿；不从角色名、音频状态或去标点后的空串推断。

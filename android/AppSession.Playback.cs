@@ -8,6 +8,10 @@ public sealed partial class AppSession
 {
     string? playingSpeaker;
     bool playingNative;
+    // 原配句按游戏配置时长推算的原声结束时刻（ElapsedRealtime）；不知道时长为 0。
+    long nativeVoiceUntil;
+    string nativeVoiceNode="";
+    const int NativeVoiceTailMilliseconds=250;
     public const string NativeVoiceStatus="正在听游戏原配";
     /// <summary>边玩边听时这一句由游戏播原声、配音包静音占位（开关打开、本章没选“用配音包”、且是清单核过的原配台词）。</summary>
     public bool IsNativeVoiceLine(PlaybackEngine? owner,Node? node)=>
@@ -41,6 +45,9 @@ public sealed partial class AppSession
             playingNative=native;
             audio.SetVolume(native?0:SpeakerVolume.Apply(Settings.Volume,Settings.SpeakerVolumes,playingSpeaker));
             long ticket=native?audio.PlayTaggedWithoutFocus(path):audio.PlayTagged(path);
+            nativeVoiceNode=node.Id;
+            nativeVoiceUntil=native&&NativeVoiceCatalog.Shared?.FindLineVoice(owner.Pack,node)?.NativeDurationMs is int nativeMs
+                ?SystemClock.ElapsedRealtime()+nativeMs+NativeVoiceTailMilliseconds:0;
             if(autoPlay.Running&&!autoPlay.BindAudio(autoPlay.Epoch,node.Id,ticket,SystemClock.ElapsedRealtime()))PauseAutoPlayback("播放请求已变化或等待超时，请重新确认自动播放位置。");
         });
         if(request!=playGeneration)return;

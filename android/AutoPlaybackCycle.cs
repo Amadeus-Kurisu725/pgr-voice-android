@@ -75,6 +75,12 @@ public sealed class AutoPlaybackCycle
         ExpectedNext=null;Deadline=0;Phase=AutoPlaybackPhase.WaitingForGame;return true;
     }
     public bool WaitingForGame=>Phase==AutoPlaybackPhase.WaitingForGame;
+    /// <summary>原配句：静音占位音频先播完时，保持本句待点击直到游戏原声按配置时长结束；不发点击、不换票据。</summary>
+    public bool HoldTapping(long epoch,string nodeId,long until)
+    {
+        if(epoch!=Epoch||Phase!=AutoPlaybackPhase.Tapping||TapTicket!=0||NodeId!=nodeId)return false;
+        Deadline=until+4_000;return true;
+    }
     /// <summary>0.4.7 游戏配音「等待确认续接」倒计时到点 / 用户「按顺序继续」：从等待回到可点击（未发出点击），之后照常 BeginTap。</summary>
     public bool ResumeTapping(long epoch,string nodeId,long now)
     {

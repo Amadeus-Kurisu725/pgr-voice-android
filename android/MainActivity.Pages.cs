@@ -97,7 +97,21 @@ public sealed partial class MainActivity
         row.AddView(right, new LinearLayout.LayoutParams(0, -2, 1));
         content.AddView(row, new LinearLayout.LayoutParams(-1, -2));
         content = right;
+        stickySide = (row, left);
+        row.Post(() => { if (alive) UpdateStickySide(); });
         return left;
+    }
+
+    // 横屏左栏（分类 / 分段标签）随整页滚动会滚出屏幕；平移左栏使其停在可视区顶部，最多到本行底部。
+    (LinearLayout Row, LinearLayout Left)? stickySide;
+    void UpdateStickySide()
+    {
+        if (stickySide is not var (row, left)) return;
+        int top = 0;
+        View? node = row;
+        while (node != null && !ReferenceEquals(node, mainContent)) { top += node.Top; node = node.Parent as View; }
+        if (node == null) { left.TranslationY = 0; return; }
+        left.TranslationY = Math.Clamp(pageScroll.ScrollY - top, 0, Math.Max(0, row.Height - left.Height));
     }
 
     /// <summary>09-B / 10-B segment tabs: dark S strip (portrait) or 150dp vertical tabs (wide landscape). Selected = paper + crimson bar.</summary>

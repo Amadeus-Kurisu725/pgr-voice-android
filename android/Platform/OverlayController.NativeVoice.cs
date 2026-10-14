@@ -47,6 +47,7 @@ public sealed partial class OverlayController
 
     sealed class NativeVoiceWaveDrawable(Color color) : Drawable
     {
+        public override ConstantState? GetConstantState() => new PgrVoice.AndroidApp.Ui.SharedDrawableState(this);
         static readonly float[] Heights = { .45f, 1f, .65f, .85f };
         readonly Paint paint = new(PaintFlags.AntiAlias) { Color = color };
         public override void Draw(Canvas canvas)
@@ -66,6 +67,7 @@ public sealed partial class OverlayController
 
     sealed class LeftRuleDrawable(Color color, int width) : Drawable
     {
+        public override ConstantState? GetConstantState() => new PgrVoice.AndroidApp.Ui.SharedDrawableState(this);
         readonly Paint paint = new() { Color = color };
         public override void Draw(Canvas canvas) => canvas.DrawRect(Bounds.Left, Bounds.Top, Bounds.Left + width, Bounds.Bottom, paint);
         public override void SetAlpha(int alpha) => paint.Alpha = alpha;

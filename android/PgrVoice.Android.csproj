@@ -7,8 +7,8 @@
     <RootNamespace>PgrVoice.AndroidApp</RootNamespace>
     <ApplicationId>cn.pgrvoice.player</ApplicationId>
     <ApplicationTitle>战双剧情配音</ApplicationTitle>
-    <ApplicationVersion>62</ApplicationVersion>
-    <ApplicationDisplayVersion>0.4.22</ApplicationDisplayVersion>
+    <ApplicationVersion>63</ApplicationVersion>
+    <ApplicationDisplayVersion>0.4.23</ApplicationDisplayVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RuntimeIdentifiers>android-arm64;android-x64</RuntimeIdentifiers>

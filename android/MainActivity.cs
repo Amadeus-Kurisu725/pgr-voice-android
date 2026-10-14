@@ -91,6 +91,7 @@ public sealed partial class MainActivity : Activity
         headingFit.NeedWidth=()=>headingFit.Natural(headingIcon)+headingFit.Natural(title)+headingFit.Natural(offlineTag)+headingFit.Natural(orientationButton); // exact: degrade only where 0.4.3 would have ellipsized the title
         CreateChapterCategoryBar();
         pageScroll=new ScrollView(this){FillViewport=true};pageScroll.SetClipToPadding(false);pageScroll.VerticalScrollBarEnabled=false;
+        pageScroll.ScrollChange+=(_,_)=>UpdateStickySide();
         content=new LinearLayout(this){Orientation=Orientation.Vertical};content.SetPadding(0,Dp(5),0,Dp(20));pageScroll.AddView(content);mainContent=content;
         root.AddView(pageScroll,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MatchParent,0,1));
         CreateSplitHost();
@@ -402,7 +403,7 @@ public sealed partial class MainActivity : Activity
         RunOnUiThread(()=>
         {
             if(!alive)return;CancelCaptureStatusTick();captureStatusButton=null;autoPlaybackState=null;autoPlaybackStopButton=null;autoPlaybackPermissionButton=null;ClearListeningViews();
-            content=mainContent;content.RemoveAllViews();splitLeftBar.RemoveAllViews();splitLeft.RemoveAllViews();splitRight.RemoveAllViews();
+            stickySide=null;content=mainContent;content.RemoveAllViews();splitLeftBar.RemoveAllViews();splitLeft.RemoveAllViews();splitRight.RemoveAllViews();
             bool split=page==0&&ChapterSplit;
             pageScroll.Visibility=split?ViewStates.Gone:ViewStates.Visible;splitHost.Visibility=split?ViewStates.Visible:ViewStates.Gone;
             chapterCategoryBar.Visibility=page==0&&!split?ViewStates.Visible:ViewStates.Gone;

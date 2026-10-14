@@ -6,6 +6,7 @@ namespace PgrVoice.AndroidApp.Ui;
 /// <summary>Shared base for the small static drawables below: alpha/colour-filter plumbing and dp helper.</summary>
 public abstract class PgrShapeDrawable : Drawable
 {
+    public override ConstantState? GetConstantState() => new SharedDrawableState(this);
     protected readonly Paint paint = new(PaintFlags.AntiAlias);
     protected readonly global::Android.Graphics.Path path = new();
     protected readonly float d;

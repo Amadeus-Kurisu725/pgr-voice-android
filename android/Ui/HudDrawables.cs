@@ -10,6 +10,7 @@ namespace PgrVoice.AndroidApp.Ui;
 /// </summary>
 public sealed class HudBackdropDrawable : Drawable
 {
+    public override ConstantState? GetConstantState() => new SharedDrawableState(this);
     private readonly Paint paint = new(PaintFlags.AntiAlias);
     private readonly float density;
     private int alpha = 255;
@@ -79,6 +80,7 @@ public sealed class HudBackdropDrawable : Drawable
 /// </summary>
 public sealed class HudHeroDrawable : Drawable
 {
+    public override ConstantState? GetConstantState() => new SharedDrawableState(this);
     private readonly Paint paint = new(PaintFlags.AntiAlias);
     private readonly global::Android.Graphics.Path path = new();
     private readonly float density;
@@ -200,6 +202,7 @@ public sealed class HudHeroDrawable : Drawable
 /// <summary>HUD divider: hairline with a crimson lead tick and sparse scale marks.</summary>
 public sealed class HudRuleDrawable : Drawable
 {
+    public override ConstantState? GetConstantState() => new SharedDrawableState(this);
     private readonly Paint paint = new(PaintFlags.AntiAlias);
     private readonly float density;
     private int alpha = 255;
@@ -231,6 +234,7 @@ public sealed class HudRuleDrawable : Drawable
 /// </summary>
 public sealed class HudSegmentDrawable : Drawable
 {
+    public override ConstantState? GetConstantState() => new SharedDrawableState(this);
     private readonly Paint paint = new(PaintFlags.AntiAlias);
     private readonly float density;
     private readonly Color color, glow;
@@ -261,6 +265,7 @@ public sealed class HudSegmentDrawable : Drawable
 /// </summary>
 public sealed class HudWaveDrawable : Drawable
 {
+    public override ConstantState? GetConstantState() => new SharedDrawableState(this);
     private readonly Paint paint = new(PaintFlags.AntiAlias);
     private readonly float density;
     private float[] heights = Array.Empty<float>();

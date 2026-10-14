@@ -18,6 +18,7 @@ public enum FxKind { Card, Hero, Empty, Listen, Cur, Line, Ctrl, Tap, Ref }
 /// </summary>
 public sealed class FusionDeco : Drawable
 {
+    public override ConstantState? GetConstantState() => new SharedDrawableState(this);
     // dx.js palette K
     internal static readonly Color Red = Color.ParseColor("#A3283A"), RedT = Color.ParseColor("#9C2536"), Crim = Color.ParseColor("#C23A4E"),
         Brass = Color.ParseColor("#B08A3E"), BrassT = Color.ParseColor("#7E6128"), Slate = Color.ParseColor("#4F6B8A"), Ink = Color.ParseColor("#1D232A"),
@@ -103,6 +104,7 @@ public sealed class FusionDeco : Drawable
 /// SV-0.4 · ARCHIVE 0029, short red-tide line. Drawn along the bottom of the header row.</summary>
 public sealed class FusionHeaderDeco(float density) : Drawable
 {
+    public override ConstantState? GetConstantState() => new SharedDrawableState(this);
     readonly float d = density;
     readonly Paint p = new(PaintFlags.AntiAlias);
     readonly global::Android.Graphics.Path path = new();
@@ -421,6 +423,7 @@ public static class Fx
 /// <summary>SPEC 切角开关 track (dx.js sw): 42×22dp chamfered plate; ON = crimson 18% fill + crimson edge, OFF = #DDE2E7 + line2 edge.</summary>
 public sealed class ChamferSwitchTrack(float density) : Drawable
 {
+    public override ConstantState? GetConstantState() => new SharedDrawableState(this);
     readonly float d = density; readonly Paint p = new(PaintFlags.AntiAlias); readonly global::Android.Graphics.Path path = new();
     bool on, enabled = true; int alpha = 255;
     public override bool IsStateful => true;
@@ -451,6 +454,7 @@ public sealed class ChamferSwitchTrack(float density) : Drawable
 /// <summary>SPEC 菱形滑块: 11dp diamond, crimson when ON, #7C8792 when OFF; 21dp intrinsic so the track stays 42dp.</summary>
 public sealed class DiamondSwitchThumb(float density) : Drawable
 {
+    public override ConstantState? GetConstantState() => new SharedDrawableState(this);
     readonly float d = density; readonly Paint p = new(PaintFlags.AntiAlias); readonly global::Android.Graphics.Path path = new();
     bool on, enabled = true; int alpha = 255;
     public override bool IsStateful => true;
