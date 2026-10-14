@@ -28,3 +28,5 @@ RouteRepairs.*.json.gz
 SourceChoices.*.json
 Assets/avatars/
 Assets/covers/
+android/Assets/avatars/
+android/Assets/covers/
