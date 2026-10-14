@@ -92,7 +92,7 @@ public sealed partial class AppSession
     }
     void StartAutoPlayback()
     {
-        if(Listening.IsPlaying)Listening.Pause();
+        Listening.PauseForGame();
         Invalidate();audio.Stop();Engine?.PauseForBrowse();
         overlay.ClearAutoPlaybackPaused();
         if(Engine==null){PauseAutoPlayback("请先打开与游戏一致的章节。");return;}

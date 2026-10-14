@@ -20,7 +20,7 @@ public sealed partial class AppSession
     public void SetNativeVoiceMute(bool value){Settings.NativeVoiceMute=value;SaveSettings();Notify();}
     public void SetNativeVoiceForPack(string packId,bool useNative)
     {if(useNative)Settings.NativeVoiceDubPacks.Remove(packId);else Settings.NativeVoiceDubPacks.Add(packId);SaveSettings();Notify();}
-    void PlayNode(PlaybackEngine owner,Node? node)
+    void PlayNode(PlaybackEngine owner,Node? node,bool preview=false)
     {
         if(!ReferenceEquals(owner,Engine)||node==null)return;
         long request=++playGeneration;
@@ -41,7 +41,8 @@ public sealed partial class AppSession
             if(autoPlay.Running && (autoPlay.Phase!=AutoPlaybackPhase.Playing||autoPlay.NodeId!=node.Id||!AutoLinePermitted(owner)))
             {PauseAutoPlayback("当前播放不属于本次已确认的路线，自动播放已暂停。");return;}
             playingSpeaker=node.Speaker;
-            bool native=IsNativeVoiceLine(owner,node);
+            // 历史试听由用户明确请求播放文件，不使用游戏原配的静音占位。
+            bool native=!preview&&IsNativeVoiceLine(owner,node);
             playingNative=native;
             audio.SetVolume(native?0:SpeakerVolume.Apply(Settings.Volume,Settings.SpeakerVolumes,playingSpeaker));
             long ticket=native?audio.PlayTaggedWithoutFocus(path):audio.PlayTagged(path);
@@ -51,7 +52,7 @@ public sealed partial class AppSession
             if(autoPlay.Running&&!autoPlay.BindAudio(autoPlay.Epoch,node.Id,ticket,SystemClock.ElapsedRealtime()))PauseAutoPlayback("播放请求已变化或等待超时，请重新确认自动播放位置。");
         });
         if(request!=playGeneration)return;
-        string action=IsNativeVoiceLine(owner,node)?NativeVoiceStatus:"播放配音";
+        string action=!preview&&IsNativeVoiceLine(owner,node)?NativeVoiceStatus:"播放配音";
         Status=string.IsNullOrWhiteSpace(node.Speaker)?action:node.Speaker+" · "+action;
     }
 }

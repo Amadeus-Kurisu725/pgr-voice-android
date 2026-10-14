@@ -42,7 +42,7 @@ public sealed partial class AppSession
 
     void StartClickFollow(bool preserveAudio = false)
     {
-        if (Listening.IsPlaying) Listening.Pause();
+        Listening.PauseForGame();
         if (!preserveAudio) Invalidate();
         if (!preserveAudio) audio.Stop();
         if (Engine is not { Current.Kind: "line" } engine || !engine.ConfirmCurrentPosition())

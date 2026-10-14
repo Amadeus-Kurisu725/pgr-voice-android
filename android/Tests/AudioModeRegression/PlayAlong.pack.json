@@ -1,0 +1,386 @@
+{
+ "schemaVersion": 3,
+ "id": "synthetic-play-along",
+ "title": "【测试夹具·合成】游戏配音倒计时：普通分支（3 项）/ 结局分歧 / 未核出口（缺口）后按顺序续接",
+ "chapters": [
+  {
+   "id": "pa",
+   "title": "合成章节",
+   "sections": [
+    {
+     "id": "pa-sec",
+     "title": "P-1 合成小节",
+     "startId": "pa-sec-s0"
+    }
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "id": "pa-sec-s0",
+   "sectionId": "pa-sec",
+   "kind": "line",
+   "pathId": "",
+   "speaker": "指挥官",
+   "text": "前面就是岔路口。",
+   "rawText": "前面就是岔路口。",
+   "nextId": "pa-sec-m1",
+   "audioStatus": "not-found"
+  },
+  {
+   "id": "pa-sec-m1",
+   "sectionId": "pa-sec",
+   "kind": "choice",
+   "pathId": "",
+   "text": "选择路线",
+   "menuType": "exclusive",
+   "nextId": "pa-sec-m1-merge",
+   "options": [
+    {
+     "id": "pa-sec-route-o1",
+     "label": "去左边",
+     "targetId": "pa-sec-a1",
+     "pathId": "pa-sec-route-o1",
+     "returnId": "pa-sec-m1-merge",
+     "mergeId": "pa-sec-m1-merge",
+     "verified": true,
+     "requires": [],
+     "excludes": [],
+     "conditionNote": "",
+     "lineIds": [
+      "pa-sec-a1"
+     ],
+     "evidence": [
+      "synthetic"
+     ],
+     "previousVerified": true,
+     "bodyVerified": true,
+     "exitVerified": true,
+     "segmentIds": [
+      "pa-sec-a1",
+      "pa-sec-o1-ret"
+     ],
+     "boundaryId": null,
+     "bodyEvidence": [
+      "synthetic"
+     ],
+     "exitEvidence": [
+      "synthetic"
+     ]
+    },
+    {
+     "id": "pa-sec-route-o2",
+     "label": "去右边",
+     "targetId": "pa-sec-b1",
+     "pathId": "pa-sec-route-o2",
+     "returnId": "pa-sec-m1-merge",
+     "mergeId": "pa-sec-m1-merge",
+     "verified": true,
+     "requires": [],
+     "excludes": [],
+     "conditionNote": "",
+     "lineIds": [
+      "pa-sec-b1"
+     ],
+     "evidence": [
+      "synthetic"
+     ],
+     "previousVerified": true,
+     "bodyVerified": true,
+     "exitVerified": true,
+     "segmentIds": [
+      "pa-sec-b1",
+      "pa-sec-o2-ret"
+     ],
+     "boundaryId": null,
+     "bodyEvidence": [
+      "synthetic"
+     ],
+     "exitEvidence": [
+      "synthetic"
+     ]
+    },
+    {
+     "id": "pa-sec-route-o3",
+     "label": "原地等待",
+     "targetId": "pa-sec-c1",
+     "pathId": "pa-sec-route-o3",
+     "returnId": "pa-sec-m1-merge",
+     "mergeId": "pa-sec-m1-merge",
+     "verified": true,
+     "requires": [],
+     "excludes": [],
+     "conditionNote": "",
+     "lineIds": [
+      "pa-sec-c1"
+     ],
+     "evidence": [
+      "synthetic"
+     ],
+     "previousVerified": true,
+     "bodyVerified": true,
+     "exitVerified": true,
+     "segmentIds": [
+      "pa-sec-c1",
+      "pa-sec-o3-ret"
+     ],
+     "boundaryId": null,
+     "bodyEvidence": [
+      "synthetic"
+     ],
+     "exitEvidence": [
+      "synthetic"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "pa-sec-m1-merge",
+   "sectionId": "pa-sec",
+   "kind": "merge",
+   "pathId": "",
+   "text": "返回共同线",
+   "nextId": "pa-sec-s1"
+  },
+  {
+   "id": "pa-sec-a1",
+   "sectionId": "pa-sec",
+   "kind": "line",
+   "pathId": "pa-sec-route-o1",
+   "speaker": "丽芙",
+   "text": "左边很安静。",
+   "rawText": "左边很安静。",
+   "nextId": "pa-sec-o1-ret",
+   "audioStatus": "not-found"
+  },
+  {
+   "id": "pa-sec-o1-ret",
+   "sectionId": "pa-sec",
+   "kind": "return",
+   "pathId": "pa-sec-route-o1",
+   "text": "",
+   "nextId": "pa-sec-m1-merge",
+   "completeRoute": "pa-sec-route-o1",
+   "setFacts": []
+  },
+  {
+   "id": "pa-sec-b1",
+   "sectionId": "pa-sec",
+   "kind": "line",
+   "pathId": "pa-sec-route-o2",
+   "speaker": "丽芙",
+   "text": "右边有脚步声。",
+   "rawText": "右边有脚步声。",
+   "nextId": "pa-sec-o2-ret",
+   "audioStatus": "not-found"
+  },
+  {
+   "id": "pa-sec-o2-ret",
+   "sectionId": "pa-sec",
+   "kind": "return",
+   "pathId": "pa-sec-route-o2",
+   "text": "",
+   "nextId": "pa-sec-m1-merge",
+   "completeRoute": "pa-sec-route-o2",
+   "setFacts": []
+  },
+  {
+   "id": "pa-sec-c1",
+   "sectionId": "pa-sec",
+   "kind": "line",
+   "pathId": "pa-sec-route-o3",
+   "speaker": "丽芙",
+   "text": "再等一会儿。",
+   "rawText": "再等一会儿。",
+   "nextId": "pa-sec-o3-ret",
+   "audioStatus": "not-found"
+  },
+  {
+   "id": "pa-sec-o3-ret",
+   "sectionId": "pa-sec",
+   "kind": "return",
+   "pathId": "pa-sec-route-o3",
+   "text": "",
+   "nextId": "pa-sec-m1-merge",
+   "completeRoute": "pa-sec-route-o3",
+   "setFacts": []
+  },
+  {
+   "id": "pa-sec-s1",
+   "sectionId": "pa-sec",
+   "kind": "line",
+   "pathId": "",
+   "speaker": "指挥官",
+   "text": "终点就在眼前。",
+   "rawText": "终点就在眼前。",
+   "nextId": "pa-sec-m2",
+   "audioStatus": "not-found"
+  },
+  {
+   "id": "pa-sec-m2",
+   "sectionId": "pa-sec",
+   "kind": "choice",
+   "pathId": "",
+   "text": "选择结局",
+   "menuType": "exclusive",
+   "nextId": "pa-sec-m2-merge",
+   "options": [
+    {
+     "id": "pa-sec-route-e1",
+     "label": "开启结局：黎明",
+     "targetId": "pa-sec-ea1",
+     "pathId": "pa-sec-route-e1",
+     "returnId": "pa-sec-m2-merge",
+     "mergeId": "pa-sec-m2-merge",
+     "verified": true,
+     "requires": [],
+     "excludes": [],
+     "conditionNote": "",
+     "lineIds": [
+      "pa-sec-ea1"
+     ],
+     "evidence": [
+      "synthetic"
+     ],
+     "previousVerified": true,
+     "bodyVerified": true,
+     "exitVerified": true,
+     "segmentIds": [
+      "pa-sec-ea1",
+      "pa-sec-e1-ret"
+     ],
+     "boundaryId": null,
+     "bodyEvidence": [
+      "synthetic"
+     ],
+     "exitEvidence": [
+      "synthetic"
+     ]
+    },
+    {
+     "id": "pa-sec-route-e2",
+     "label": "开启结局：黄昏",
+     "targetId": "pa-sec-eb1",
+     "pathId": "pa-sec-route-e2",
+     "returnId": "pa-sec-m2-merge",
+     "mergeId": "pa-sec-m2-merge",
+     "verified": true,
+     "requires": [],
+     "excludes": [],
+     "conditionNote": "",
+     "lineIds": [
+      "pa-sec-eb1"
+     ],
+     "evidence": [
+      "synthetic"
+     ],
+     "previousVerified": true,
+     "bodyVerified": true,
+     "exitVerified": true,
+     "segmentIds": [
+      "pa-sec-eb1",
+      "pa-sec-e2-ret"
+     ],
+     "boundaryId": null,
+     "bodyEvidence": [
+      "synthetic"
+     ],
+     "exitEvidence": [
+      "synthetic"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "pa-sec-m2-merge",
+   "sectionId": "pa-sec",
+   "kind": "merge",
+   "pathId": "",
+   "text": "返回共同线",
+   "nextId": "pa-sec-s2"
+  },
+  {
+   "id": "pa-sec-ea1",
+   "sectionId": "pa-sec",
+   "kind": "line",
+   "pathId": "pa-sec-route-e1",
+   "speaker": "丽芙",
+   "text": "天亮了。",
+   "rawText": "天亮了。",
+   "nextId": "pa-sec-e1-ret",
+   "audioStatus": "not-found"
+  },
+  {
+   "id": "pa-sec-e1-ret",
+   "sectionId": "pa-sec",
+   "kind": "return",
+   "pathId": "pa-sec-route-e1",
+   "text": "",
+   "nextId": "pa-sec-m2-merge",
+   "completeRoute": "pa-sec-route-e1",
+   "setFacts": []
+  },
+  {
+   "id": "pa-sec-eb1",
+   "sectionId": "pa-sec",
+   "kind": "line",
+   "pathId": "pa-sec-route-e2",
+   "speaker": "丽芙",
+   "text": "太阳落下了。",
+   "rawText": "太阳落下了。",
+   "nextId": "pa-sec-e2-ret",
+   "audioStatus": "not-found"
+  },
+  {
+   "id": "pa-sec-e2-ret",
+   "sectionId": "pa-sec",
+   "kind": "return",
+   "pathId": "pa-sec-route-e2",
+   "text": "",
+   "nextId": "pa-sec-m2-merge",
+   "completeRoute": "pa-sec-route-e2",
+   "setFacts": []
+  },
+  {
+   "id": "pa-sec-s2",
+   "sectionId": "pa-sec",
+   "kind": "line",
+   "pathId": "",
+   "speaker": "指挥官",
+   "text": "后面的连接还没有核实。",
+   "rawText": "后面的连接还没有核实。",
+   "nextId": "pa-sec-gap",
+   "audioStatus": "not-found"
+  },
+  {
+   "id": "pa-sec-gap",
+   "sectionId": "pa-sec",
+   "kind": "gap",
+   "pathId": "",
+   "text": "后续连接待核对",
+   "nextId": null
+  },
+  {
+   "id": "pa-sec-s3",
+   "sectionId": "pa-sec",
+   "kind": "line",
+   "pathId": "",
+   "speaker": "指挥官",
+   "text": "按顺序的下一句。",
+   "rawText": "按顺序的下一句。",
+   "nextId": "pa-sec-s4",
+   "audioStatus": "not-found"
+  },
+  {
+   "id": "pa-sec-s4",
+   "sectionId": "pa-sec",
+   "kind": "line",
+   "pathId": "",
+   "speaker": "指挥官",
+   "text": "再下一句。",
+   "rawText": "再下一句。",
+   "nextId": null,
+   "audioStatus": "not-found"
+  }
+ ]
+}

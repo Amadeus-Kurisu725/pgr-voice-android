@@ -10,7 +10,7 @@ public sealed partial class AppSession
     public OnboardingStore Onboarding { get; private set; } = null!;
     public void PauseForOnboarding()
     {
-        if(Listening.IsPlaying)Listening.Pause();
+        Listening.PauseForGame();
         Invalidate();audio.Stop();Engine?.PauseForBrowse();overlay.Hide();Notify();
     }
     public OnboardingSelection? SelectedOnboardingLine()

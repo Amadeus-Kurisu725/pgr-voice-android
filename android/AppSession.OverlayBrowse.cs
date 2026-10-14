@@ -39,7 +39,7 @@ public sealed partial class AppSession
         overlayBrowseChanging++;
         try
         {
-            if (Listening.IsPlaying) Listening.Pause();
+            Listening.PauseForGame();
             overlayBrowsePage = page; overlayBrowseDirectory = false;
             // 菜单仍保持 Choice/Gap，原声仍冻结；只暂停音频和跟随，不抹去 OCR 候选。
             Invalidate(false, preserveBranchIntent: page == OverlayBrowsePage.Branches); audio.Stop(); Engine?.PauseForBrowse();

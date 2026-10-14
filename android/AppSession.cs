@@ -187,7 +187,7 @@ public sealed partial class AppSession
     public void LoadPack(string id)
     {
         if(IsDeletingPackage)throw new InvalidOperationException("正在删除章节，请等待完成。");
-        if(Listening.IsPlaying)Listening.Pause();
+        Listening.PauseForGame();
         Invalidate();audio.Stop();
         if(Engine!=null){SaveProgress();saveQueue.Flush();}
         var next=new PlaybackEngine(Packages.Load(id));
@@ -210,9 +210,9 @@ public sealed partial class AppSession
     }
     public void PreviewNode(Node node)
     {
-        if(Listening.IsPlaying)Listening.Pause();
+        Listening.PauseForGame();
         if(Engine==null||Engine.Mode==RunMode.Original)return;
-        Invalidate();Engine.PauseForBrowse();PlayNode(Engine,node);Status="试听，不改变剧情位置。";Notify();
+        Invalidate();Engine.PauseForBrowse();PlayNode(Engine,node,preview:true);Status="试听，不改变剧情位置。";Notify();
     }
     public async Task<InstalledPackage?> ImportAsync(Stream stream,CancellationToken token,ImportedZipSource? source=null,bool openAfterImport=true)
     {
@@ -244,7 +244,7 @@ public sealed partial class AppSession
     }
     public void Command(Action<PlaybackEngine> action,bool confirmAfter=false)
     {
-        if(Listening.IsPlaying)Listening.Pause();
+        Listening.PauseForGame();
         if(Engine==null){Status="请先导入并打开一个章节。";Notify();return;}
         // 现稿续接：未核正文按单句定位播放时，导航器的“下一句”会回到所属菜单；先记下现稿写的下一处，推进后改为续接。
         var singleLineDraft=DraftAfterSingleLine(Engine);string? beforeId=Engine.CurrentId;string? beforePending=Engine.ExportNavigation().Current.PendingMenu;
@@ -266,7 +266,7 @@ public sealed partial class AppSession
     },true);
     public void ConfirmCurrent()
     {
-        if(Listening.IsPlaying)Listening.Pause();
+        Listening.PauseForGame();
         Invalidate();
         if(Engine?.Current?.Kind!="line"){Status="请先选择当前台词。";Notify();return;}
         if(Engine.Mode==RunMode.Original){Status="原声时段需要选择续接台词。";Notify();return;}
@@ -275,11 +275,11 @@ public sealed partial class AppSession
         Status="位置已确认，可用点按跟随、上一句、下一句或重播。";
         Notify();
     }
-    public void PrepareCapture(){if(Listening.IsPlaying)Listening.Pause();Invalidate();Engine?.PauseForBrowse();lastMask=null;stability.Reset();Status="正在请求屏幕捕获授权，授权后请再次确认当前位置。";Notify();}
+    public void PrepareCapture(){Listening.PauseForGame();Invalidate();Engine?.PauseForBrowse();lastMask=null;stability.Reset();Status="正在请求屏幕捕获授权，授权后请再次确认当前位置。";Notify();}
     public void CaptureDenied(){Invalidate();Status="未授权屏幕捕获，可继续使用手动播放。";Notify();}
     public void RequestOcr(bool overlayResult = false)
     {
-        if(Listening.IsPlaying)Listening.Pause();
+        Listening.PauseForGame();
         Invalidate();Engine?.PauseForBrowse();
         overlay.ClearAutoPlaybackPaused();
         if(Engine==null){Status="请先打开与游戏一致的章节，再进行 OCR 定位。";Notify();return;}
@@ -319,7 +319,7 @@ public sealed partial class AppSession
     }
     /// <summary>SPEC C.5: read-only top hint on the overlay layer; false = overlays unavailable (caller falls back to Toast).</summary>
     public bool ShowTopHint(string message) => overlay.ShowTopHint(message);
-    public void ShowOverlay(){if(Listening.IsPlaying)Listening.Pause();VoiceForegroundService.EnsureStarted(context);overlay.Show();}
+    public void ShowOverlay(){Listening.PauseForGame();VoiceForegroundService.EnsureStarted(context);overlay.Show();}
     public void HideOverlay(){if(ClickFollowRunning||BranchFollowRunning)StopClickFollow("悬浮控制已隐藏，点按跟随已停止。");else branchResumeIntent=null;PauseAutoPlaybackForOverlayExit("悬浮控制已隐藏，自动播放已暂停。");overlay.Hide();}
     public void Stop(){Listening.Stop();StopGame();}
     void StopGame(){Invalidate();audio.Stop();Engine?.PauseForBrowse();overlay.Hide();VoiceForegroundService.StopAll(context);_=UnloadOcrAfterStopAsync();SaveProgress();Status="已停止，进度已保存。";Notify();}

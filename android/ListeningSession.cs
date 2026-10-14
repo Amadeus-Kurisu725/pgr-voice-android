@@ -641,6 +641,11 @@ public sealed class ListeningSession
     /// 暂停。0.4.8（审稿必须改 1 / 2）：停下处倒计时进行中时等同「暂停」倒计时（冻结秒数），已暂停时保持暂停——
     /// 通知栏、耳机键、目录试听前的暂停都走这里，不再取消倒计时（否则下次播放会重开一个不暂停的 15 秒）。
     /// </summary>
+    /// <summary>开始游戏配音前，也冻结尚未发声的听书倒计时；已暂停的秒数和位置保持。</summary>
+    public void PauseForGame()
+    {
+        if (IsPlaying || PlayTogglesCountdown) Pause();
+    }
     public void Pause()
     {
         if (PlayTogglesCountdown) { if (!CountdownPaused) ToggleCountdownPause(); return; }
