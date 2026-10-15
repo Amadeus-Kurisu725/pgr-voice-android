@@ -15,15 +15,16 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
+          persist-credentials: true
 
-      - name: Merge upstream without rewriting history
+      - name: Merge upstream, preferring upstream on conflicts
         shell: bash
         run: |
           set -euo pipefail
@@ -34,10 +35,22 @@ jobs:
             exit 0
           fi
           if ! git merge-base HEAD upstream/main >/dev/null; then
-            echo "::error::Unrelated histories; manual review required"
+            echo "::error::Unrelated history; stopping to avoid overwriting unrelated repository"
             exit 1
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git merge --no-ff --no-edit upstream/main
+          if git merge -X theirs --no-ff --no-edit upstream/main; then
+            echo "Merged upstream (upstream preferred on content conflicts)"
+          else
+            echo "Unresolved conflict type; replacing working tree with upstream while retaining Git ancestry and this workflow"
+            git merge --abort
+            git merge -s ours --no-ff --no-commit upstream/main
+            git rm -r -f --quiet -- .
+            git checkout upstream/main -- .
+            mkdir -p .github/workflows
+            git show HEAD:.github/workflows/sync-upstream.yml > .github/workflows/sync-upstream.yml
+            git add -A
+            git commit -m "chore: sync upstream using upstream tree on conflicts"
+          fi
           git push origin HEAD:main
