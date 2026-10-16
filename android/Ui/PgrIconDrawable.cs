@@ -5,7 +5,7 @@ using Android.Runtime;
 
 namespace PgrVoice.AndroidApp.Ui;
 
-/// <summary>Original 24-unit line icons. Static geometry is not simulated playback data.</summary>
+/// <summary>Original 24-unit line icons (square caps, mitred joins). Static geometry is not simulated playback data.</summary>
 [Register("cn/pgrvoice/player/ui/PgrIconDrawable")]
 public sealed class PgrIconDrawable : Drawable
 {
@@ -33,9 +33,10 @@ public sealed class PgrIconDrawable : Drawable
         paint.Color = state.Color;
         paint.Alpha = state.Color.A * alpha / 255;
         paint.SetStyle(Paint.Style.Stroke);
-        paint.StrokeWidth = 1.65f;
-        paint.StrokeCap = Paint.Cap.Round;
-        paint.StrokeJoin = Paint.Join.Round;
+        // Square caps and mitred joins keep the line icons crisp and industrial.
+        paint.StrokeWidth = 1.6f;
+        paint.StrokeCap = Paint.Cap.Square;
+        paint.StrokeJoin = Paint.Join.Miter;
         path.Reset();
         switch (state.Name)
         {
@@ -76,6 +77,10 @@ public sealed class PgrIconDrawable : Drawable
                 Poly(7, 10, 12, 15, 17, 10); break;
             case "chevron": case "chevron_right":
                 Poly(9, 5, 16, 12, 9, 19); break;
+            case "chevron_left": case "back":
+                Poly(15, 5, 8, 12, 15, 19); break;
+            case "warning":
+                Poly(12, 3, 22, 20, 2, 20, 12, 3); Line(12, 9, 12, 14); Line(12, 16.5f, 12, 17.5f); break;
             case "chevron_up":
                 Poly(5, 15, 12, 8, 19, 15); break;
             case "chevron_down":
@@ -95,6 +100,33 @@ public sealed class PgrIconDrawable : Drawable
                 path.AddArc(4, 3, 20, 19, 180, 180);
                 Poly(4, 11, 4, 19, 8, 19, 8, 12, 4, 12);
                 Poly(20, 11, 20, 19, 16, 19, 16, 12, 20, 12); break;
+            case "mark":
+                // App mark: chamfered plate, crimson slash is drawn separately below.
+                Poly(7, 3, 21, 3, 21, 17, 17, 21, 3, 21, 3, 7, 7, 3); Line(7, 14, 7, 17); break;
+            case "search":
+                path.AddCircle(10.5f, 10.5f, 6.5f, global::Android.Graphics.Path.Direction.Cw!); Line(15.5f, 15.5f, 20, 20); break;
+            case "feedback":
+                Poly(4, 4, 20, 4, 20, 16, 11, 16, 7, 20, 7, 16, 4, 16, 4, 4); Line(8, 9, 16, 9); Line(8, 12, 13, 12); break;
+            case "volume":
+                Poly(3, 9, 7, 9, 12, 5, 12, 19, 7, 15, 3, 15, 3, 9); Line(16, 9, 16, 15); Line(19, 6, 19, 18); break;
+            case "folder":
+                Poly(3, 6, 9, 6, 11, 8, 21, 8, 21, 19, 3, 19, 3, 6); break;
+            case "trash":
+                Line(4, 6, 20, 6); Poly(9, 6, 9, 3, 15, 3, 15, 6); Poly(6, 6, 7, 21, 17, 21, 18, 6); Line(10, 10, 10, 17); Line(14, 10, 14, 17); break;
+            case "speed":
+                path.AddArc(3, 5, 21, 23, 180, 180); Line(12, 14, 16.5f, 9); Line(5, 14, 7, 14); Line(17, 14, 19, 14); break;
+            case "timer":
+                path.AddCircle(12, 13, 8, global::Android.Graphics.Path.Direction.Cw!); Line(10, 3, 14, 3); Poly(12, 9, 12, 13, 15, 15); break;
+            case "orientation":
+                Poly(8, 3, 16, 3, 16, 21, 8, 21, 8, 3); Poly(3, 10, 3, 14); Poly(21, 10, 21, 14); break;
+            case "check":
+                Poly(4, 12.5f, 9.5f, 18, 20, 6); break;
+            case "lock":
+                Poly(5, 11, 19, 11, 19, 21, 5, 21, 5, 11); path.AddArc(8, 4, 16, 14, 180, 180); Line(8, 9, 8, 11); Line(16, 9, 16, 11); Line(12, 15, 12, 17); break;
+            case "exit":
+                Poly(13, 4, 4, 4, 4, 20, 13, 20); Line(9, 12, 20, 12); Poly(16, 8, 20, 12, 16, 16); break;
+            case "dot":
+                path.AddCircle(12, 12, 3, global::Android.Graphics.Path.Direction.Cw!); break;
             default:
                 Outline(5, 5, 19, 19); Line(9, 12, 15, 12); break;
         }
@@ -108,6 +140,13 @@ public sealed class PgrIconDrawable : Drawable
         {
             paint.SetStyle(Paint.Style.Fill);
             canvas.DrawCircle(6, 5, 2, paint); canvas.DrawCircle(18, 5, 2, paint); canvas.DrawCircle(6, 19, 2, paint);
+        }
+        if (state.Name == "mark")
+        {
+            paint.SetStyle(Paint.Style.Fill); paint.Color = PgrTheme.Red; paint.Alpha = PgrTheme.Red.A * alpha / 255;
+            using var slash = new global::Android.Graphics.Path();
+            slash.MoveTo(13.5f, 6.5f); slash.LineTo(17, 6.5f); slash.LineTo(12, 17.5f); slash.LineTo(8.5f, 17.5f); slash.Close();
+            canvas.DrawPath(slash, paint);
         }
         canvas.RestoreToCount(save);
     }

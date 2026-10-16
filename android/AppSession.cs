@@ -47,7 +47,11 @@ public sealed partial class AppSession
     public AppSettings Settings { get; }
     public ListeningSession Listening { get; }
     public SessionDiagnostics Diagnostics { get; }
-    public string Status { get; private set; } = "先导入章节 ZIP，再选择游戏当前台词。";
+    string statusText = "先导入章节 ZIP，再选择游戏当前台词。";
+    string? settingsSaveWarning;
+    public string? SettingsSaveWarning => settingsSaveWarning;
+    public bool HasSettingsSaveWarning => settingsSaveWarning != null;
+    public string Status { get => statusText + (settingsSaveWarning == null ? "" : "；" + settingsSaveWarning); private set => statusText = value; }
     public string OcrText { get; private set; } = "尚未识别";
     public IReadOnlyList<MatchCandidate> Candidates { get; private set; } = Array.Empty<MatchCandidate>();
 #if DEBUG
@@ -67,16 +71,23 @@ public sealed partial class AppSession
     public event Action? ContentChanged;
     public event Action<OverlayCommand>? NavigationRequested;
     public event Action? CapturePermissionRequested;
+    LineFeedbackSnapshot? pendingLineFeedback;
+    public LineFeedbackSnapshot? TakePendingLineFeedback()
+    { var snapshot=pendingLineFeedback;pendingLineFeedback=null;return snapshot; }
 
     AppSession(Context context)
     {
         this.context=context;
         string root=context.FilesDir!.AbsolutePath;
+        var onboardingInstall=OnboardingInstallSnapshot.Capture(root);
         settingsFile=Path.Combine(root,"settings.json");
         try { Settings=Json.ReadWithBackup<AppSettings>(settingsFile,out _); } catch { Settings=new(); }
+        Settings.Normalize();
+        Onboarding=new(root,onboardingInstall,Settings.OnboardingShown);
         Packages=new AndroidChapterStorage(Path.Combine(root,"chapters")); Progress=new(Path.Combine(root,"progress")); Progress.Load();
         Screen=new AndroidScreenInput(context);
         Diagnostics=new(Path.Combine(root,"diagnostics"));
+        PgrVoice.Listening.PlaybackLog.Configure(Path.Combine(root,"diagnostics","播放记录.csv"));
         _=Task.Run(()=>{try{Packages.CleanAbandonedImports();}catch(Exception ex){Diagnostics.Log("导入清理",ex.Message);}});
         CoreDiagnostics.Message+=(kind,text)=>Diagnostics.Log(kind,text);
         ocr=new(context); audio=new AndroidAudioPlayer(context); overlay=new(context);
@@ -84,13 +95,18 @@ public sealed partial class AppSession
         overlay.SetCompactControlsVisible(Settings.ShowCompactControls);
         overlay.CompactButtonsChanged+=SetCompactButtonsVisible;
         overlay.CompactControlsChanged+=SetCompactControlsVisible;
-        Listening=new(context,Packages,PrepareListening,Diagnostics);
+        Listening=new(context,Packages,PrepareListening,Diagnostics,
+            node=>SpeakerVolume.Apply(Settings.Volume,Settings.SpeakerVolumes,node?.Speaker),
+            ()=>Settings.DefaultBranchOption,
+            ()=>Settings.BranchAutoSelect);
         audio.PlaybackCompleted+=ticket=>Post(()=>OnAutoAudioCompleted(ticket));
-        GameAdvanceAccessibilityService.SessionInvalidated+=message=>Post(()=>{if(autoPlay.Running)PauseAutoPlayback(message);if(ClickFollowRunning)StopClickFollow(message);});
+        GameAdvanceAccessibilityService.SessionInvalidated+=message=>Post(CaptureFollowSessionInvalidation(message));
         overlay.Command+=OnOverlayCommand;
+        WirePromptBars(); // 0.4.8 界面：顶边融合条（AppSession.PromptBars.cs）
         overlay.CaptureInteraction+=message=>Diagnostics.Log("定位取消触摸",message);
         overlay.CaptureCancelRequested+=generation=>Post(()=>
         {
+            if(CancelBranchFromCaptureControl(generation))return;
             bool current=autoPlay.Phase==AutoPlaybackPhase.CheckingCurrent&&
                 generation==autoCaptureControlGeneration&&autoCaptureControlEpoch==autoPlay.Epoch;
             Diagnostics.Log("开局取消请求",$"control={generation}; current={autoCaptureControlGeneration}; autoEpoch={autoPlay.Epoch}; accepted={current}");
@@ -98,13 +114,14 @@ public sealed partial class AppSession
                 PauseAutoPlayback("已取消开局定位，尚未点击游戏。请手动选句或 OCR 定位后再开始。");
         });
         overlay.BrowseRequested+=OnOverlayBrowseRequested;
+        overlay.BrowseRefreshRequested+=OnOverlayBrowseRefreshRequested;
         overlay.BrowseItemSelected+=OnOverlayBrowseSelected;
         overlay.Error+=message=>Post(()=>ReportError(message));
         audio.Error+=message=>Post(()=>ReportError(message));
         audio.Interrupted+=message=>Post(()=>{if(autoPlay.Running){PauseAutoPlayback(message+" 请核对游戏位置后重新开启。");return;}Invalidate();Engine?.PauseForBrowse();Status=message;Notify();});
         Screen.FrameAvailable+=OnFrame;
         Screen.DisplayChanged+=state=>Post(()=>OnDisplayChanged(state));
-        Screen.CaptureStopped+=message=>Post(()=>{if(ClickFollowRunning)return;if(autoPlay.Running){PauseAutoPlayback(message+"；请重新授权后开启，或使用点按跟随与手动播放。");return;}Invalidate();Engine?.PauseForBrowse();Status=message+"；手动播放仍可使用。";Notify();});
+        Screen.CaptureStopped+=message=>Post(()=>{if(BranchFollowRunning){StopBranchFollow(message+"；请手动确认分支。");return;}branchResumeIntent=null;if(ClickFollowRunning)return;if(autoPlay.Running){PauseAutoPlayback(message+"；请重新授权后开启，或使用点按跟随与手动播放。");return;}Invalidate();Engine?.PauseForBrowse();Status=message+"；手动播放仍可使用。";Notify();});
         VoiceForegroundService.StopRequested+=()=>Post(StopGame);
         if(Settings.LastPackId is { } id) try { LoadPack(id); } catch(Exception ex){ReportError(ex.Message);}
         ApplyAudioSettings();
@@ -114,7 +131,7 @@ public sealed partial class AppSession
         if(Looper.MyLooper()==Looper.MainLooper) Guard(action); else main.Post(()=>Guard(action));
     }
     void Guard(Action action){try{action();}catch(Exception ex){ReportError(ex.Message);}}
-    void Notify(){Changed?.Invoke();overlay.UpdateClickFollow(ClickFollowRunning);overlay.UpdateCurrentLine(Engine?.Current?.Speaker??"",Engine?.Current?.Text??"请选择当前台词");overlay.UpdateStatus(Status,Engine?.Mode==RunMode.Paused,autoPlay.Running);RefreshOverlayBrowseIfNeeded();VoiceForegroundService.UpdateNotification(Status,notificationPage);}
+    void Notify(){Changed?.Invoke();overlay.UpdateClickFollow(ClickFollowRunning||BranchFollowRunning);overlay.SetNativeVoice(IsNativeVoiceLine(Engine,Engine?.Current));overlay.UpdateCurrentLine(GameEndWaiting!=null?"等待游戏画面定位":Engine?.Current?.Speaker??"",OverlayCurrentLineText());overlay.UpdateStatus(StatusLine,Engine?.Mode==RunMode.Paused,autoPlay.Running);RefreshOverlayBrowseIfNeeded();RefreshPromptBars();VoiceForegroundService.UpdateNotification(StatusLine,notificationPage);}
     public void SetCompactButtonsVisible(bool enabled)
     {
         Settings.ShowCompactButtons=enabled;overlay.SetCompactButtonsVisible(enabled);SaveSettings();ContentChanged?.Invoke();Notify();
@@ -123,8 +140,8 @@ public sealed partial class AppSession
     {
         Settings.ShowCompactControls=enabled;overlay.SetCompactControlsVisible(enabled);SaveSettings();ContentChanged?.Invoke();Notify();
     }
-    void ReportError(string message){overlay.SetCaptureHidden(false);if(ClickFollowRunning)StopClickFollow(message);else if(autoPlay.Running)PauseAutoPlayback(message);else{Status=message;Notify();}Diagnostics.Error(message);}
-    void Invalidate(bool clearCandidates=true,bool clearPreview=true){ResetOverlayBrowseRequests();CancelClickFollow();CancelAutoPlayback();ocrEpoch++;ocrSchedule.Reset();manualOcr=false;manualOcrOverlay=false;playGeneration++;if(clearPreview){pendingFrame.Clear();overlay.SetCaptureHidden(false);}if(clearCandidates){Candidates=Array.Empty<MatchCandidate>();notificationPage=null;}}
+    void ReportError(string message){overlay.SetCaptureHidden(false);if(BranchFollowRunning)StopBranchFollow(message);else if(ClickFollowRunning)StopClickFollow(message);else if(autoPlay.Running)PauseAutoPlayback(message);else{Status=message;Notify();}Diagnostics.Error(message);}
+    void Invalidate(bool clearCandidates=true,bool clearPreview=true,bool preserveBranchIntent=false){CancelBranchAnchorRequest();ResetOverlayBrowseRequests();CancelBranchFollow(preserveBranchIntent);CancelClickFollow();CancelAutoPlayback();ocrEpoch++;ocrSchedule.Reset();manualOcr=false;manualOcrOverlay=false;playGeneration++;if(clearPreview){pendingFrame.Clear();overlay.SetCaptureHidden(false);}if(clearCandidates){Candidates=Array.Empty<MatchCandidate>();notificationPage=null;}}
     public void SetUiVisible(bool visible)
     {
         uiVisible=visible;
@@ -143,27 +160,45 @@ public sealed partial class AppSession
         Status=enabled?"已切换全画面定位，无需框选；识别后请核对候选。":"已切换框选定位，使用当前屏幕保存的字幕框。";
         ContentChanged?.Invoke();Notify();
     }
-    public void SaveSettings()=>Json.Save(settingsFile,Settings);
+    public void SaveSettings()
+    {
+        string? previousWarning = settingsSaveWarning;
+        try { Json.Save(settingsFile,Settings); settingsSaveWarning = null; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or NotSupportedException or ArgumentException)
+        {
+            settingsSaveWarning = "设置尚未保存，本次已生效；请检查手机可用存储空间后重新设置";
+            Diagnostics.Log("设置保存失败",ex.Message);
+        }
+        // 音量等入口没有单独刷新状态；仅警告变化时通知，避免每次滑动重建界面。
+        if (settingsSaveWarning != previousWarning) Notify();
+    }
     public void ApplyAudioSettings()
     {
-        audio.SetVolume(Math.Clamp(Settings.Volume,0,1));
+        audio.SetVolume(playingNative?0:SpeakerVolume.Apply(Settings.Volume,Settings.SpeakerVolumes,playingSpeaker));
         audio.Strategy=Settings.VoicePriority?AudioStrategy.VoicePriority:AudioStrategy.Simultaneous;
+        Listening.RefreshVolume();
         SaveSettings();
+    }
+    public void SetSpeakerVolume(string? speaker,int percent)
+    {
+        SpeakerVolume.Set(Settings.SpeakerVolumes,speaker,percent);
+        ApplyAudioSettings();
     }
     public void LoadPack(string id)
     {
         if(IsDeletingPackage)throw new InvalidOperationException("正在删除章节，请等待完成。");
-        if(Listening.IsPlaying)Listening.Pause();
+        Listening.PauseForGame();
         Invalidate();audio.Stop();
         if(Engine!=null){SaveProgress();saveQueue.Flush();}
         var next=new PlaybackEngine(Packages.Load(id));
         Progress.TryRestore(next); Engine=next;
-        SectionId=next.Current?.SectionId??next.Pack.Chapters.SelectMany(c=>c.Sections).First().Id;
+        SectionId=next.Current?.SectionId??SectionDisplay.FirstListed(next.Pack.Chapters.SelectMany(c=>c.Sections))!.Id;
         next.PlayRequested+=node=>PlayNode(next,node);
         next.StopRequested+=()=>{if(ReferenceEquals(Engine,next)){playGeneration++;audio.Stop();}};
         next.Changed+=()=>{if(!ReferenceEquals(Engine,next))return;SaveProgress();Notify();};
         Settings.LastPackId=id;SaveSettings();
         Status=next.Current==null?"请选择与游戏画面一致的台词。":"已恢复进度，确认位置后再开始。";
+        if(next.Pack.BundledCorrectionNotice.Length>0)Status=next.Pack.BundledCorrectionNotice+"。"+Status;
         if(Progress.LastError.Length>0)Status=Progress.LastError;
         ContentChanged?.Invoke();Notify();
     }
@@ -175,11 +210,11 @@ public sealed partial class AppSession
     }
     public void PreviewNode(Node node)
     {
-        if(Listening.IsPlaying)Listening.Pause();
+        Listening.PauseForGame();
         if(Engine==null||Engine.Mode==RunMode.Original)return;
-        Invalidate();Engine.PauseForBrowse();PlayNode(Engine,node);Status="试听，不改变剧情位置。";Notify();
+        Invalidate();Engine.PauseForBrowse();PlayNode(Engine,node,preview:true);Status="试听，不改变剧情位置。";Notify();
     }
-    public async Task<InstalledPackage?> ImportAsync(Stream stream,CancellationToken token,ImportedZipSource? source=null)
+    public async Task<InstalledPackage?> ImportAsync(Stream stream,CancellationToken token,ImportedZipSource? source=null,bool openAfterImport=true)
     {
         if(PackagesBusy)throw new InvalidOperationException("章节文件正在处理中，请等待完成。");
         // 导入原子替换音频目录前释放听书文件，更新后再次选择本章恢复独立进度。
@@ -193,7 +228,15 @@ public sealed partial class AppSession
             else{Settings.ImportedArchives.Remove(installed.PackId);SaveSettings();}
             // 进度单独保存，原包只在所有校验完成后切换。
             Listening.PackageUpdated(installed.PackId);
-            LoadPack(installed.PackId);Status=(installed.IsUpdate?"章节更新完成。":"章节导入完成。")+Status;
+            if(openAfterImport)LoadPack(installed.PackId);
+            // 导入与加载均成功后，让章节页显示刚导入的章节；批量时跟随最后成功项。
+            if(openAfterImport)
+            {
+                var importedPack=Engine!.Pack;
+                Settings.ChapterCategory=ChapterCatalog.Category(importedPack.Id,importedPack.Title);
+                SaveSettings();
+            }
+            Status=(installed.IsUpdate?"章节更新完成。":"章节导入完成。")+statusText;
             return installed;
         }
         catch(OperationCanceledException){Status="已取消导入，原章节与进度保留。";return null;}
@@ -201,9 +244,12 @@ public sealed partial class AppSession
     }
     public void Command(Action<PlaybackEngine> action,bool confirmAfter=false)
     {
-        if(Listening.IsPlaying)Listening.Pause();
+        Listening.PauseForGame();
         if(Engine==null){Status="请先导入并打开一个章节。";Notify();return;}
+        // 现稿续接：未核正文按单句定位播放时，导航器的“下一句”会回到所属菜单；先记下现稿写的下一处，推进后改为续接。
+        var singleLineDraft=DraftAfterSingleLine(Engine);string? beforeId=Engine.CurrentId;string? beforePending=Engine.ExportNavigation().Current.PendingMenu;
         Invalidate();action(Engine);
+        if(!FollowDraftAfterSingleLine(Engine,singleLineDraft,beforeId,beforePending)&&Engine.Mode is RunMode.Gap or RunMode.Choice)TryFollowDraftContinuation(Engine);
         if(Engine.Current!=null)SectionId=Engine.Current.SectionId;
         if(Engine.Mode==RunMode.Original)Status="游戏原声：配音已停止、位置已冻结；选择当前台词后续接。";
         else if(Engine.Mode==RunMode.Paused)Status="已暂停。核对游戏位置后，点确认位置继续。";
@@ -220,7 +266,7 @@ public sealed partial class AppSession
     },true);
     public void ConfirmCurrent()
     {
-        if(Listening.IsPlaying)Listening.Pause();
+        Listening.PauseForGame();
         Invalidate();
         if(Engine?.Current?.Kind!="line"){Status="请先选择当前台词。";Notify();return;}
         if(Engine.Mode==RunMode.Original){Status="原声时段需要选择续接台词。";Notify();return;}
@@ -229,11 +275,11 @@ public sealed partial class AppSession
         Status="位置已确认，可用点按跟随、上一句、下一句或重播。";
         Notify();
     }
-    public void PrepareCapture(){if(Listening.IsPlaying)Listening.Pause();Invalidate();Engine?.PauseForBrowse();lastMask=null;stability.Reset();Status="正在请求屏幕捕获授权，授权后请再次确认当前位置。";Notify();}
+    public void PrepareCapture(){Listening.PauseForGame();Invalidate();Engine?.PauseForBrowse();lastMask=null;stability.Reset();Status="正在请求屏幕捕获授权，授权后请再次确认当前位置。";Notify();}
     public void CaptureDenied(){Invalidate();Status="未授权屏幕捕获，可继续使用手动播放。";Notify();}
     public void RequestOcr(bool overlayResult = false)
     {
-        if(Listening.IsPlaying)Listening.Pause();
+        Listening.PauseForGame();
         Invalidate();Engine?.PauseForBrowse();
         overlay.ClearAutoPlaybackPaused();
         if(Engine==null){Status="请先打开与游戏一致的章节，再进行 OCR 定位。";Notify();return;}
@@ -258,7 +304,7 @@ public sealed partial class AppSession
                 frameWidth,frameHeight,uiVisible,out _)==GameFrameRequestResult.Expired)FrameRequestExpired();
         }),10_050);
     }
-    void FrameRequestExpired(){overlay.SetCaptureHidden(false);Status="没有等到稳定的游戏画面，请回到游戏后重试定位或框选。";Notify();}
+    void FrameRequestExpired(){CancelBranchAnchorRequest();overlay.SetCaptureHidden(false);Status="没有等到稳定的游戏画面，请回到游戏后重试定位或框选。";Notify();}
     public void SetRegion(int width,int height,ScreenRegion region)
     {
         SetRegion(new(frameDisplayState,captureSession,width,height),region);
@@ -271,8 +317,10 @@ public sealed partial class AppSession
         Settings.DisplayRegions[selection.Display.RegionKey!]=region.Clamp();SaveSettings();Invalidate();lastMask=null;stability.Reset();
         Status=Settings.OcrFullScreen?"字幕框已保存；当前仍为全画面定位，可在定位范围中切换为框选区域。":"当前屏幕的字幕区域已保存，可重新 OCR 定位。";Notify();
     }
-    public void ShowOverlay(){if(Listening.IsPlaying)Listening.Pause();VoiceForegroundService.EnsureStarted(context);overlay.Show();}
-    public void HideOverlay(){if(ClickFollowRunning)StopClickFollow("悬浮控制已隐藏，点按跟随已停止。");PauseAutoPlaybackForOverlayExit("悬浮控制已隐藏，自动播放已暂停。");overlay.Hide();}
+    /// <summary>SPEC C.5: read-only top hint on the overlay layer; false = overlays unavailable (caller falls back to Toast).</summary>
+    public bool ShowTopHint(string message) => overlay.ShowTopHint(message);
+    public void ShowOverlay(){Listening.PauseForGame();VoiceForegroundService.EnsureStarted(context);overlay.Show();}
+    public void HideOverlay(){if(ClickFollowRunning||BranchFollowRunning)StopClickFollow("悬浮控制已隐藏，点按跟随已停止。");else branchResumeIntent=null;PauseAutoPlaybackForOverlayExit("悬浮控制已隐藏，自动播放已暂停。");overlay.Hide();}
     public void Stop(){Listening.Stop();StopGame();}
     void StopGame(){Invalidate();audio.Stop();Engine?.PauseForBrowse();overlay.Hide();VoiceForegroundService.StopAll(context);_=UnloadOcrAfterStopAsync();SaveProgress();Status="已停止，进度已保存。";Notify();}
     void PrepareListening()
@@ -291,20 +339,39 @@ public sealed partial class AppSession
         {
             switch(command)
             {
-                case OverlayCommand.Next:ManualOverlayStep(e=>e.Next(true));break;
+                case OverlayCommand.Next:
+                    // 游戏倒计时中：只有「下一句」真能挪动位置时才结束倒计时；挪不动则保持倒计时。
+                    if(gameCountdown!=null){if(TryOverlayNextDuringGameCountdown())break;Command(e=>e.Next(true));break;}
+                    ManualOverlayStep(e=>e.Next(true));break;
                 case OverlayCommand.Previous:ManualOverlayStep(e=>e.Previous());break;
                 case OverlayCommand.Replay:ManualOverlayStep(e=>e.Replay());break;
-                case OverlayCommand.Pause:if(Engine?.Mode==RunMode.Paused)ConfirmCurrent();else Command(e=>e.PauseForBrowse());break;
+                case OverlayCommand.Pause:
+                    // 游戏倒计时中 / 已暂停：与卡片「暂停 / 继续」相同，冻结秒数，不 CancelGameCountdown。
+                    if(gameCountdown is {Waiting:false,Finished:false}){ToggleGameCountdownPause();break;}
+                    if(Engine?.Mode==RunMode.Paused)ConfirmCurrent();else Command(e=>e.PauseForBrowse());break;
                 case OverlayCommand.Original:Command(e=>e.EnterOriginal());break;
                 case OverlayCommand.Ocr:if(Screen.CaptureActive)RequestOcr(true);else OpenApp("Capture");break;
                 case OverlayCommand.Hide:HideOverlay();break;
                 case OverlayCommand.AutoPlay:if(autoPlay.Running)PauseAutoPlayback("自动播放已暂停。",false);else StartAutoPlayback();break;
                 case OverlayCommand.AdvanceRegion:SelectAdvanceRegion();break;
-                case OverlayCommand.ClickFollow:if(ClickFollowRunning)StopClickFollow();else StartClickFollow();break;
+                case OverlayCommand.ClickFollow:if(ClickFollowRunning||BranchFollowRunning)StopClickFollow();else StartClickFollow();break;
                 case OverlayCommand.ConfirmPosition:ConfirmCurrent();break;
+                case OverlayCommand.Feedback:OpenOverlayLineFeedback();break;
                 default:NavigationRequested?.Invoke(command);OpenApp(command.ToString());break;
             }
         });
+    }
+    void OpenOverlayLineFeedback()
+    {
+        var engine=Engine;
+        if(engine?.Current is not {Kind:"line"} node){Status="请先定位要反馈的台词，或到历史记录选择句子。";Notify();return;}
+        var recent=engine.History.Take(Math.Clamp(engine.HistoryPosition+1,0,engine.History.Count)).TakeLast(4)
+            .Select(v=>engine.Pack.ById.GetValueOrDefault(v.NodeId)).OfType<Node>();
+        string version=context.PackageManager?.GetPackageInfo(context.PackageName!,global::Android.Content.PM.PackageInfoFlags.MetaData)?.VersionName??"未知版本";
+        pendingLineFeedback=LineFeedback.Capture(engine.Pack,node,version,"Android","游戏悬浮控制",recent);
+        // 先终止点击/点按/旧回调，再打开主界面；反馈完成不会自行恢复。
+        Invalidate();audio.Stop();engine.PauseForBrowse();
+        Status="已暂停，正在填写这句反馈。";Notify();OpenApp("Feedback");
     }
     void OpenApp(string page)
     {
@@ -319,6 +386,8 @@ public sealed partial class AppSession
         Settings.HasRegion(frameDisplayState.RegionKey);
     void OnDisplayChanged(ScreenDisplayState state)
     {
+        if(BranchFollowRunning){StopBranchFollow("屏幕形态已变化，分支跟随已停止。请手动核对。");return;}
+        branchResumeIntent=null;
         if(ClickFollowRunning){CheckClickFollowEnvironment();return;}
         if(state!=Screen.DisplayState||!Screen.CaptureActive||frameWidth==0)return;
         if(autoPlay.Running)PauseAutoPlayback("屏幕形态已变化，自动播放已停止。请为当前屏幕核对字幕框和点击区域，再重新定位开启。");
@@ -337,6 +406,7 @@ public sealed partial class AppSession
     }
     void HandleFrame(CapturedFrame frame)
     {
+        if(BranchFollowRunning){HandleBranchFollowFrame(frame);return;}
         if(ClickFollowRunning)return;
         ObservedFrameCount++;
         Diagnostics.Frame(frame.IsRepeatedSample);
@@ -369,7 +439,7 @@ public sealed partial class AppSession
             manualOcr=true; manualOcrOverlay=frameRequest.OverlayResult;
         }
         if(autoPlay.Running&&!CheckAutoPlaybackEnvironment())return;
-        if(autoPlay.Running&&autoPlay.Phase!=AutoPlaybackPhase.CheckingCurrent)return;
+        if(autoPlay.Running&&autoPlay.Phase is not (AutoPlaybackPhase.CheckingCurrent or AutoPlaybackPhase.WaitingForGame))return;
         // 自动播放由人工核对起点；OCR 仅服务主动定位，不持续识别下一句。
         if(!autoPlay.Running&&!manualOcr)return;
         if(Engine==null)return;
@@ -426,7 +496,8 @@ public sealed partial class AppSession
                     {
                         overlay.SetCaptureHidden(false);
                         ocrSchedule.Complete(ticket,!result.IsTruncated,false,result.Elapsed.TotalMilliseconds);
-                        Status=Candidates.Count==0?"未找到明确候选，可切换定位范围或从台词页手动选句。":"识别完成，请核对台词与路线后采用候选。";
+                        if(TryHandleBranchAnchorResult(blocks,w,h,result.IsTruncated,out var anchorNotice)){Notify();return;}
+                        Status=anchorNotice??(Candidates.Count==0?"未找到明确候选，可切换定位范围或从台词页手动选句。":"识别完成，请核对台词与路线后采用候选。");
                         notificationPage="Locate";ContentChanged?.Invoke();
                         if(showOcrInOverlay&&overlay.CanShow){overlay.Show();overlay.ShowBrowsePage(OverlayBrowsePage.Locate);}
                         else OpenApp("Locate");
@@ -436,7 +507,7 @@ public sealed partial class AppSession
                         var observation=new FollowObservation(epoch,sample,frameKey,!result.IsTruncated,blocks,section);
                         if(autoPlay.Running)HandleAutoPlaybackObservation(engine,observation);
                         ocrSchedule.Complete(ticket,!result.IsTruncated,AutoNeedsConsensus,result.Elapsed.TotalMilliseconds);
-                        if(ocrSchedule.Slow)Status+=" 本次定位耗时较长，也可停止后手动选择当前句。";
+                        if(ocrSchedule.Slow)statusText+=" 本次定位耗时较长，也可停止后手动选择当前句。";
                     }
                     Notify();
                 });

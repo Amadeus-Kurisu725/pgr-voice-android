@@ -1,0 +1,112 @@
+using System.Text.Json;
+using Android.Media.Session;
+using Android.OS;
+using PgrVoice;
+using PgrVoice.AndroidApp;
+using PgrVoice.AndroidApp.Contracts;
+using PgrVoice.AndroidApp.Platform;
+using PgrVoice.Listening;
+using PgrVoice.Packages;
+using AndroidSession = PgrVoice.AndroidApp.ListeningSession;
+
+var results = new List<object>(); int failures = 0;
+void Check(bool value, string reason) { if (!value) throw new Exception(reason); }
+void Test(string name, Action test)
+{
+    try { test(); results.Add(new { name, passed = true }); Console.WriteLine("PASS " + name); }
+    catch (Exception ex) { failures++; results.Add(new { name, passed = false, error = ex.ToString() }); Console.WriteLine("FAIL " + name + ": " + ex.Message); }
+}
+
+Test("卡片暂停后超过五分钟仍保留媒体会话与剩余秒数，耳机继续保持与主按钮同步", () =>
+{
+    using var f = new Fixture(); f.AtBranch(); Handler.Advance(2_000);
+    f.Session.ToggleCountdownPause();
+    Check(f.Session.CountdownRemaining == 13 && f.Session.PlayCaption == "继续", "卡片暂停前提失败");
+    Handler.Advance(360_000);
+    Check(!f.Service.Destroyed && f.Media.Active, "五分钟空闲清理销毁了仍可继续的倒计时媒体会话");
+    Check(f.Session.CountdownPaused && f.Session.CountdownRemaining == 13 && f.Session.PlayEnabled, "剩余秒数或暂停状态丢失");
+    Check(f.Media.State!.Code == PlaybackStateCode.Paused && f.CenterCaption == "继续", "媒体/通知未同步暂停");
+    f.Media.Receiver!.OnPlay();
+    Check(!f.Session.CountdownPaused && f.Session.CountdownRemaining == 13 && f.Session.PlayCaption == "暂停" && f.CenterCaption == "暂停", "耳机继续重置了倒计时或未同步");
+    Handler.Advance(1_000); Check(f.Session.CountdownRemaining == 12, "继续后没有从13秒接着倒数");
+});
+Test("通知暂停、锁屏继续与主按钮/卡片共用倒计时，重复暂停不解除暂停", () =>
+{
+    using var f = new Fixture(); f.AtBranch(); Handler.Advance(1_000);
+    f.Service.Dispatch("pgr.listening.TOGGLE");
+    Check(f.Session.CountdownPaused && f.Session.PlayCaption == "继续" && f.CenterCaption == "继续", "通知暂停未同步");
+    f.Media.Receiver!.OnPause(); Handler.Advance(10_000);
+    Check(f.Session.CountdownPaused && f.Session.CountdownRemaining == 14, "重复暂停改变剩余时间");
+    f.Media.Receiver.OnPlay();
+    Check(!f.Session.CountdownPaused && f.Session.CountdownRemaining == 14 && f.Media.State!.Code == PlaybackStateCode.Playing, "锁屏继续未同步");
+    f.Session.PlayButton(); Check(f.Session.CountdownPaused && f.CenterCaption == "继续", "主按钮暂停未同步通知");
+});
+Test("倒计时运行保留唤醒锁，暂停释放，继续重新取得", () =>
+{
+    using var f = new Fixture(); f.AtBranch();
+    Check(!f.Session.IsPlaying && f.Session.PlayTogglesCountdown, "不是无音频的倒计时状态");
+    Check(f.WakeLock.IsHeld, "倒计时运行时未保持唤醒，锁屏休眠可能停住计时");
+    f.Media.Receiver!.OnPause(); Check(!f.WakeLock.IsHeld, "暂停倒计时仍持有唤醒锁");
+    f.Media.Receiver.OnPlay(); Check(f.WakeLock.IsHeld, "继续倒计时未重取唤醒锁");
+});
+Test("旧的五分钟退出回调在新倒计时开始后执行也不能销毁会话", () =>
+{
+    using var f = new Fixture(); var stale = Handler.IdleCallback;
+    Check(stale != null, "未建立普通空闲退出回调");
+    f.AtBranch(); f.Session.ToggleCountdownPause(); stale!();
+    Check(!f.Service.Destroyed && f.Session.CountdownPaused && f.Session.CountdownRemaining == 15, "旧退出回调清掉了当前倒计时");
+});
+Test("普通空闲暂停仍在五分钟退出，明确停止立即退出", () =>
+{
+    using (var f = new Fixture())
+    {
+        Handler.Advance(299_999); Check(!f.Service.Destroyed, "普通空闲过早退出");
+        Handler.Advance(1); Check(f.Service.Destroyed && !f.Media.Active && !f.WakeLock.IsHeld, "普通空闲没有按原规则退出");
+    }
+    using (var f = new Fixture())
+    {
+        f.AtBranch(); f.Service.Dispatch("STOP");
+        Check(f.Service.Destroyed && f.Session.CountdownRemaining == 0 && !f.WakeLock.IsHeld, "明确停止未清理倒计时及服务");
+    }
+});
+
+string output = Path.GetFullPath(args.FirstOrDefault() ?? Path.Combine(Path.GetTempPath(), "listening-media-service-results.json"));
+Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+File.WriteAllText(output, JsonSerializer.Serialize(new { createdUtc = DateTimeOffset.UtcNow, passed = failures == 0, count = results.Count, failures, tests = results,
+    scope = "真实ListeningSession、ListeningForegroundService、ListeningMediaCallback；沿用已提交PlayAlong合成老夹具，不播放新音频、不读写正式库。Android系统、通知、时钟、唤醒锁和音频为受控替身；不代表真实锁屏、耳机、进程回收或ARM64设备验证。" }, Json.Options));
+Console.WriteLine($"ListeningMediaService: {results.Count - failures}/{results.Count}; report={output}");
+return failures == 0 ? 0 : 1;
+
+sealed class Fixture : IChapterStorage, IDisposable
+{
+    public string Root { get; } = Path.Combine(Path.GetTempPath(), "pgr-listening-media-service", Guid.NewGuid().ToString("N"));
+    readonly Pack pack;
+    public AndroidSession Session { get; }
+    public ListeningForegroundService Service { get; } = new();
+    public MediaSession Media => MediaSession.Latest!;
+    public PowerManager.WakeLock WakeLock => Android.Content.Context.Power.Latest!;
+    public string CenterCaption => Android.Content.Context.Notifications.Last!.Actions[1].Title;
+    public Fixture()
+    {
+        Handler.Reset(); Directory.CreateDirectory(Root);
+        pack = Pack.Load(Path.Combine(AppContext.BaseDirectory, "PlayAlong.pack.json"));
+        Session = new(new(Root), this, () => { }, new(), null, () => 1, () => true);
+        AppSession.Current = new() { Listening = Session };
+        Session.Open(pack.Id, "pa"); Session.SetPolicy(ListeningBranchPolicy.Manual);
+        Service.OnCreate(); Service.OnStartCommand(null, 0, 1);
+    }
+    public void AtBranch()
+    {
+        Session.Play();
+        for (int i = 0; i < 100 && !Session.PlayTogglesCountdown; i++) Handler.Advance(100);
+        if (!Session.PlayTogglesCountdown || Session.CountdownRemaining != 15) throw new Exception("未进入老夹具分支倒计时：" + Session.Status);
+    }
+    public void Dispose() { if (!Service.Destroyed) Service.OnDestroy(); Handler.Reset(); }
+    public Pack Load(string packId) => pack;
+    public IReadOnlyList<InstalledPackage> List() => [];
+    public InstalledPackage? Find(string packId) => null;
+    public void CleanAbandonedImports() { }
+    public Task<InstalledPackage> ImportAsync(Stream stream, CancellationToken cancellationToken = default, IProgress<PackageImportProgress>? progress = null) => throw new NotSupportedException();
+    public Task<PackageRemovalResult> RemoveAsync(string packId, string revision) => throw new NotSupportedException();
+    public PackageFolder Browse(string packId, string relativePath = "", string? revision = null) => throw new NotSupportedException();
+}

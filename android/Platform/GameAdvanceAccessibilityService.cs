@@ -17,6 +17,7 @@ public sealed record GameAdvanceAvailability(bool Connected, bool TargetForegrou
 {
     public bool CanTap => Connected && TargetForeground && ScreenReady;
     public string? DisplayKey { get; init; }
+    public string? ForegroundPackage { get; init; }
 }
 
 public enum GameAdvanceTapStatus { Completed, Cancelled, Rejected, Unavailable, Invalidated }
@@ -36,7 +37,6 @@ public sealed record GameAdvanceTapResult(GameAdvanceTapStatus Status, string Re
 [MetaData("android.accessibilityservice", Resource = "@xml/game_advance_accessibility")]
 public sealed class GameAdvanceAccessibilityService : AccessibilityService
 {
-    public const string OfficialGamePackage = "com.kurogame.haru.hero";
     private static readonly object Gate = new();
     private static GameAdvanceAccessibilityService? current;
     private static long nextSession;
@@ -57,6 +57,12 @@ public sealed class GameAdvanceAccessibilityService : AccessibilityService
     public static event Action<string>? SessionInvalidated;
 
     public static GameAdvanceAvailability GetAvailability(string targetPackage)
+        => InspectCurrent(targetPackage);
+
+    // 仅在用户主动开启或框选时读取当前窗口；运行后仍核对同一个窗口，切出即停。
+    public static GameAdvanceAvailability GetForegroundAvailability() => InspectCurrent(null);
+
+    static GameAdvanceAvailability InspectCurrent(string? targetPackage)
     {
         lock (Gate)
         {
@@ -74,13 +80,6 @@ public sealed class GameAdvanceAccessibilityService : AccessibilityService
             if (current is not { connected: true, destroyed: false } service) return 0;
             // The player's own Activity must never be treated as the game, including in diagnostics.
             if (string.IsNullOrWhiteSpace(targetPackage) || targetPackage == service.PackageName) return 0;
-#if DEBUG
-            if (targetPackage != OfficialGamePackage && targetPackage != "cn.pgrvoice.autoplayfixture")
-            { service.lastReason = "自动下一句只支持战双官服或指定测试画面。"; return 0; }
-#else
-            if (targetPackage != OfficialGamePackage)
-            { service.lastReason = "自动下一句只支持已设置的战双官服。"; return 0; }
-#endif
             var state = service.Inspect(targetPackage, null).Availability;
             if (!state.CanTap || width <= 0 || height <= 0 || state.DisplayWidth != width ||
                 state.DisplayHeight != height || state.Rotation != rotation || service.pending != null)
@@ -103,6 +102,10 @@ public sealed class GameAdvanceAccessibilityService : AccessibilityService
     /// decides the result. Cancellation invalidates all queued requests. An already dispatched touch
     /// cannot be recalled by Android; its late callback is ignored and never authorizes another tap.
     /// </summary>
+    /// <summary>每次真正派发点击前调用；返回的占用在点击任务结束时归还（顶边提示条不可触碰，见 PromptBarTouchLease）。</summary>
+    public static Func<IDisposable?>? BeforeTap { get; set; }
+    public static Func<IReadOnlyList<int>>? PromptWindowIdsBeforeTap { get; set; }
+
     public static Task<GameAdvanceTapResult> TapAsync(long token, float x, float y,
         CancellationToken cancellationToken = default)
     {
@@ -123,10 +126,74 @@ public sealed class GameAdvanceAccessibilityService : AccessibilityService
             result.SetResult(new(GameAdvanceTapStatus.Cancelled, "点击已取消。"));
             return result.Task;
         }
-        // The token is checked again on the main looper immediately before Android dispatch.
-        if (service.main?.Post(() => service.DispatchOne(token, x, y, cancellationToken, result)) != true)
+        // 窗口准备和派发都归入主线程。两帧给隐藏状态进入窗口系统的机会，随后仍走原前台/遮挡检查。
+        if (service.main?.Post(() => service.PrepareTap(token, x, y, cancellationToken, result)) != true)
             result.TrySetResult(new(GameAdvanceTapStatus.Unavailable, "自动点击服务已停止。"));
         return result.Task;
+    }
+
+    void PrepareTap(long token, float x, float y, CancellationToken cancellation,
+        TaskCompletionSource<GameAdvanceTapResult> result)
+    {
+        if (cancellation.IsCancellationRequested)
+        {
+            CancelToken(token);
+            result.TrySetResult(new(GameAdvanceTapStatus.Cancelled, "点击已取消。"));
+            return;
+        }
+        IDisposable? lease;
+        IReadOnlyList<int> promptWindowIds;
+        try
+        {
+            promptWindowIds = PromptWindowIdsBeforeTap?.Invoke() ?? Array.Empty<int>();
+            lease = BeforeTap?.Invoke();
+        }
+        catch (Exception)
+        {
+            result.TrySetResult(new(GameAdvanceTapStatus.Rejected, "提示窗口未能让出触碰位置，本次未点击。"));
+            return;
+        }
+        if (lease == null) { DispatchOne(token, x, y, cancellation, result); return; }
+        // TCS 续体可能在线程池：归还也排回 main，避免旧恢复排队越过下一次主线程取得。
+        _ = result.Task.ContinueWith(_ =>
+        {
+            if (main?.Post(lease.Dispose) != true) lease.Dispose();
+        }, TaskContinuationOptions.ExecuteSynchronously);
+        long deadline = SystemClock.UptimeMillis() + 500;
+        bool preparationFinished = false;
+        void RejectPreparation() => result.TrySetResult(new(
+            cancellation.IsCancellationRequested ? GameAdvanceTapStatus.Cancelled : GameAdvanceTapStatus.Rejected,
+            "触碰准备已取消或超时，本次未点击。"));
+        bool WindowsPrepared()
+        {
+            if (result.Task.IsCompleted || SystemClock.UptimeMillis() >= deadline || promptWindowIds.Count == 0) return true;
+            try
+            {
+                var snapshots = Windows;
+                if (snapshots == null) return false;
+                try { return !snapshots.Any(w => promptWindowIds.Contains(w.Id)); }
+                finally { foreach (var window in snapshots) window.Dispose(); }
+            }
+            catch { return false; }
+        }
+        var frames = new GameAdvancePreparationFrames(() =>
+        {
+            if (result.Task.IsCompleted) return;
+            // 包含主线程长时间停顿：不能在三秒租约已归还后执行迟到的手势。
+            if (SystemClock.UptimeMillis() >= deadline) { RejectPreparation(); return; }
+            preparationFinished = true;
+            DispatchOne(token, x, y, cancellation, result);
+        }, WindowsPrepared);
+        try
+        {
+            Choreographer.Instance!.PostFrameCallback(frames);
+            if (main?.PostDelayed(() =>
+            {
+                if (!preparationFinished && !result.Task.IsCompleted) RejectPreparation();
+                Choreographer.Instance?.RemoveFrameCallback(frames);
+            }, 500) != true) RejectPreparation();
+        }
+        catch (Exception) { RejectPreparation(); }
     }
 
     /// <summary>Synchronous invalidation prevents already queued work from becoming a new touch.</summary>
@@ -408,7 +475,7 @@ public sealed class GameAdvanceAccessibilityService : AccessibilityService
         if (cancelledSession) NotifyInvalidated(cancelledReason);
     }
 
-    private (GameAdvanceAvailability Availability, bool PointSafe) Inspect(string packageName, (float X, float Y)? point)
+    private (GameAdvanceAvailability Availability, bool PointSafe) Inspect(string? packageName, (float X, float Y)? point)
     {
         int width = 0, height = 0, rotation = 0;
         GameAdvanceAvailability Failure(string reason, bool screenReady = false, bool foreground = false) =>
@@ -426,14 +493,8 @@ public sealed class GameAdvanceAccessibilityService : AccessibilityService
             var keyguard = (KeyguardManager?)GetSystemService(KeyguardService);
             if (power?.IsInteractive != true || keyguard?.IsKeyguardLocked != false)
                 return (Failure("屏幕已关闭或锁定，自动播放已暂停。"), false);
-            if (string.IsNullOrWhiteSpace(packageName) || packageName == PackageName)
-                return (Failure("请设置战双游戏作为自动播放目标。", true), false);
-#if DEBUG
-            if (packageName != OfficialGamePackage && packageName != "cn.pgrvoice.autoplayfixture")
-                return (Failure("自动下一句只支持战双官服或指定测试画面。", true), false);
-#else
-            if (packageName != OfficialGamePackage) return (Failure("自动下一句只支持已设置的战双官服。", true), false);
-#endif
+            if (packageName != null && (string.IsNullOrWhiteSpace(packageName) || packageName == PackageName))
+                return (Failure("请回到游戏，从悬浮控制开始。", true), false);
             var windows = Windows;
             if (windows == null || windows.Count == 0)
                 return (Failure("无法确认游戏前台窗口，已暂停自动播放。", true), false);
@@ -450,8 +511,15 @@ public sealed class GameAdvanceAccessibilityService : AccessibilityService
                         root?.PackageName ?? "", bounds.Left, bounds.Top, bounds.Right, bounds.Bottom));
                 }
                 var focused = snapshots.FirstOrDefault(w => w.Focused);
-                if (focused == null || focused.Package != packageName || focused.Type != AccessibilityWindowType.Application)
-                    return (Failure("战双游戏已离开前台，自动播放已暂停。", true), false);
+                if (focused == null || focused.Type != AccessibilityWindowType.Application ||
+                    string.IsNullOrWhiteSpace(focused.Package) || focused.Package == PackageName ||
+                    (packageName != null && focused.Package != packageName))
+                    return (Failure("游戏已离开前台，请回到游戏后重新开始。", true), false);
+                // 桌面不能成为一次新的游戏会话；无需枚举或保存已安装客户端。
+                using var home = new Intent(Intent.ActionMain);
+                home.AddCategory(Intent.CategoryHome); home.SetPackage(focused.Package);
+                if (PackageManager?.ResolveActivity(home, (Android.Content.PM.PackageInfoFlags)0) != null)
+                    return (Failure("请先打开游戏，再从悬浮控制开始。", true), false);
                 // Our non-focusable controller can become active after a touch; it is allowed
                 // only while the game retains input focus. Player activities are never allowed.
                 if (snapshots.Any(w => w.Active && w.Id != focused.Id &&
@@ -467,7 +535,7 @@ public sealed class GameAdvanceAccessibilityService : AccessibilityService
                 using var mode = display.GetMode();
                 var profile = new PhysicalDisplayProfile(display.DisplayId, mode!.PhysicalWidth, mode.PhysicalHeight, rotation);
                 return (new GameAdvanceAvailability(connected && !destroyed, true, true, width, height, rotation, "")
-                    { DisplayKey = profile.RegionKey }, true);
+                    { DisplayKey = profile.RegionKey, ForegroundPackage = focused.Package }, true);
             }
             finally
             {
@@ -494,6 +562,17 @@ public sealed class GameAdvanceAccessibilityService : AccessibilityService
         public TaskCompletionSource<GameAdvanceTapResult> Result { get; } = result;
         public GameAdvanceGestureCallback? Callback;
         public CancellationTokenRegistration Cancellation;
+    }
+}
+
+// 在第二次 vsync 的输入阶段前，前一帧的窗口遍历已有机会提交。最终安全性仍由 DispatchOne 检查。
+sealed class GameAdvancePreparationFrames(System.Action ready, Func<bool> prepared) : Java.Lang.Object, Choreographer.IFrameCallback
+{
+    int remaining = 2;
+    public void DoFrame(long frameTimeNanos)
+    {
+        if (--remaining <= 0 && prepared()) ready();
+        else Choreographer.Instance!.PostFrameCallback(this);
     }
 }
 

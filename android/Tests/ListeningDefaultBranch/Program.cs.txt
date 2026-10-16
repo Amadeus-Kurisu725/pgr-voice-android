@@ -1,0 +1,1807 @@
+using System.Text.Json;
+using PgrVoice;
+using PgrVoice.Following;
+using PgrVoice.Listening;
+using PgrVoice.Packages;
+using PgrVoice.AndroidApp;
+using PgrVoice.AndroidApp.Contracts;
+using PgrVoice.AndroidApp.Platform;
+using AndroidSession = PgrVoice.AndroidApp.ListeningSession;
+using CoreSession = PgrVoice.Listening.ListeningSession;
+
+// 第38章 38-1「黑客斗士的命运」：每个选项 bodyVerified=true / exitVerified=false，段尾以 return→merge→下一菜单 相连，
+// v3 边界 gap 的 resumeMenuIds 为空。修复前听书默认分支播到「你看起来没睡好？…」后停在“等待确认续接”。
+string packFile = args.FirstOrDefault() ?? "/workspace/pgrui/diag/ch38/pack.json";
+string output = Path.GetFullPath(args.Skip(1).FirstOrDefault() ?? Path.Combine(Path.GetTempPath(), "listening-default-branch-results.json"));
+const string Section = "ch38-71dc2c5d361c068b1528";
+string P(string tail) => Section + "-" + tail;
+string Stall = P("9e545f13c647d61e591f");      // 穆尔：你看起来没睡好？要我帮你带杯咖啡吗？
+string Common = P("b1dca");                    // 前缀匹配：章节共同台词（伊利希恩…）
+
+var results = new List<object>(); int failures = 0;
+// 0.4.7（J）：测试包没有音频，每句都按字数停留——按顺序执行排定的延时任务（停留、倒计时）直到满足条件。
+void Drain(Func<bool> done, int limit = 20000)
+{
+    for (int i = 0; i < limit && !done() && Android.OS.Handler.Delayed.Count > 0; i++)
+    { var next = Android.OS.Handler.Delayed[0]; Android.OS.Handler.Delayed.RemoveAt(0); next.Action(); }
+}
+void Check(bool value, string message) { if (!value) throw new Exception(message); }
+void Test(string name, Action action)
+{
+    try { action(); results.Add(new { name, passed = true }); Console.WriteLine("PASS " + name); }
+    catch (Exception ex) { failures++; results.Add(new { name, passed = false, error = ex.ToString() }); Console.WriteLine("FAIL " + name + ": " + ex.Message); }
+}
+if (!File.Exists(packFile)) { Console.WriteLine("缺少第38章 pack.json：" + packFile); return 2; }
+Pack Load() => Pack.Load(packFile);
+string ChapterOf(Pack pack) => pack.Chapters.First(c => c.Sections.Any(s => s.Id == Section)).Id;
+List<ListeningItem> SectionItems(CoreSession s) => s.Items.Where(i => i.SectionId == Section).ToList();
+int IndexOfNode(IReadOnlyList<ListeningItem> items, string prefix) => items.ToList().FindIndex(i => i.Kind == ListeningItemKind.Line && i.NodeId.StartsWith(prefix, StringComparison.Ordinal));
+ChoiceOption Option(Pack pack, string tail) => pack.Nodes.SelectMany(n => n.Options).Single(o => o.Id == P(tail));
+const string DeclaredNotice = "现稿续接：";
+
+// ───────── 听书：共享核心规划 ─────────
+foreach (var policy in new[] { ListeningBranchPolicy.First, ListeningBranchPolicy.Second })
+Test($"听书核心 {policy}：38-1 不再停在「你看起来没睡好？」，沿登记返回连接播到本节共同台词", () =>
+{
+    var pack = Load(); var s = new CoreSession(pack, ChapterOf(pack), policy);
+    var items = SectionItems(s);
+    Check(items.All(i => !i.IsBlocking), "本节仍有等待续接：" + string.Join(" | ", items.Where(i => i.IsBlocking).Select(i => i.Notice)));
+    int stall = IndexOfNode(items, Stall), common = IndexOfNode(items, Common);
+    Check(stall >= 0 && common > stall, "没有从停顿句继续到共同台词");
+    Check(items.Skip(stall + 1).First().Kind == ListeningItemKind.Notice && items[stall + 1].Notice.Contains(DeclaredNotice), "停顿句后没有登记连接提示");
+    Check(items.Count(i => i.Kind == ListeningItemKind.Line && i.NodeId.StartsWith(P("route-"), StringComparison.Ordinal)) == 0, "把结构节点当台词播放");
+    // 嵌套 4 选 1（饮品）：第一个 → 库洛洛橙C美式，第二个 → 大卫杰克；单选项菜单（与穆尔交谈）两种设置都走唯一选项。
+    var drink = Option(pack, policy == ListeningBranchPolicy.Second ? "route-002-01" : "route-002-00");
+    var other = Option(pack, policy == ListeningBranchPolicy.Second ? "route-002-00" : "route-002-01");
+    Check(drink.LineIds.All(id => items.Any(i => i.NodeId == id)), "没有播放设定序号的饮品选项");
+    Check(other.LineIds.All(id => items.All(i => i.NodeId != id)), "播放了另一个饮品选项");
+    Check(Option(pack, "route-000-00").SegmentIds.All(id => items.Any(i => i.NodeId == id)), "单选项菜单没有回落到第一个");
+});
+Test("听书核心 Manual：选择后同样续接，到下一菜单停下等待选择而非等待续接", () =>
+{
+    var pack = Load(); var s = new CoreSession(pack, ChapterOf(pack), ListeningBranchPolicy.Manual);
+    int menus = 0, guard = 0; bool passedStall = false;
+    while (s.Current is { } item && item.SectionId != Section && guard++ < 5000) s.MoveNext();
+    while (s.Current is { } item && item.SectionId == Section && guard++ < 5000)
+    {
+        Check(!item.IsBlocking, "手动选择仍停在等待续接：" + item.Notice);
+        if (item.Kind == ListeningItemKind.Choice) { menus++; Check(s.Choose(item.Options![0].Id), "无法选择"); continue; }
+        if (item.NodeId == Stall) passedStall = true;
+        s.MoveNext();
+    }
+    // 0.4.7（C）：只有一个选项的 8 个菜单在手动选择下也自动继续，只在 4 选项饮品菜单停下。
+    int singles = s.ChoicePoints.Count(c => c.SectionId == Section && c.AutoKind == PlaybackLog.Types.SingleOption);
+    Check(passedStall && menus >= 1 && singles >= 8, $"手动选择没有走完本节（menus={menus} singles={singles}）");
+});
+Test("听书核心 All：全部听取保持原补充片段方式，不使用登记连接", () =>
+{
+    var pack = Load(); var s = new CoreSession(pack, ChapterOf(pack), ListeningBranchPolicy.All);
+    Check(SectionItems(s).All(i => !i.Notice.Contains(DeclaredNotice)), "全部听取改变了行为");
+});
+Test("听书核心：现稿在此之后没有下一处（缺口）时仍停在等待续接", () =>
+{
+    var pack = Load(); pack.ById[P("route-000-00-return")].NextId = null;
+    var items = SectionItems(new CoreSession(pack, ChapterOf(pack), ListeningBranchPolicy.First));
+    int stall = IndexOfNode(items, Stall);
+    var after = items.Skip(stall + 1).TakeWhile(i => !i.IsBlocking).ToList();
+    Check(stall >= 0 && after.All(i => i.Kind == ListeningItemKind.Notice) && items.Skip(stall + 1).Any(i => i.IsBlocking && i.Notice.Contains("缺口")), "缺口被越过");
+});
+Test("听书核心（策略 B）：现稿连接跳到别处时照现稿续接并标注，句子带现稿续接标记", () =>
+{
+    var pack = Load(); pack.ById[P("route-000-00-return")].NextId = P("menu-003");
+    var items = SectionItems(new CoreSession(pack, ChapterOf(pack), ListeningBranchPolicy.First));
+    int stall = IndexOfNode(items, Stall);
+    Check(stall >= 0 && !items[stall + 1].IsBlocking && items[stall + 1].Notice.StartsWith(DeclaredNotice), "没有按现稿续接");
+    var next = items.Skip(stall + 1).First(i => i.Kind == ListeningItemKind.Line);
+    Check(Option(pack, "route-003-00").SegmentIds.Contains(next.NodeId), "没有接到现稿写的 menu-003");
+    Check(items.All(i => !i.IsBlocking), "仍有停顿");
+});
+Test("听书核心（策略 B）：正文未核实但收录台词的选项按现稿收听并标注；全部听取不变", () =>
+{
+    var pack = Load(); Option(pack, "route-001-00").BodyVerified = false;
+    var items = SectionItems(new CoreSession(pack, ChapterOf(pack), ListeningBranchPolicy.First));
+    Check(items.All(i => !i.IsBlocking), "未核正文仍停");
+    Check(Option(pack, "route-001-00").LineIds.Where(id => pack.ById[id].Kind == "line" && pack.ById[id].PathId == Option(pack, "route-001-00").PathId)
+        .All(id => items.Any(i => i.NodeId == id && i.DraftContinuation)), "未核正文没有标为现稿续接");
+    var manual = SectionItems(new CoreSession(pack, ChapterOf(pack), ListeningBranchPolicy.All));
+    Check(manual.All(i => !i.DraftContinuation), "全部听取出现现稿标记");
+});
+Test("听书核心：已核分支内的台词不带现稿续接标记，越过未核出口后才带", () =>
+{
+    var pack = Load(); var items = SectionItems(new CoreSession(pack, ChapterOf(pack), ListeningBranchPolicy.First));
+    int stall = IndexOfNode(items, Stall);
+    Check(items.Take(stall + 1).All(i => !i.DraftContinuation), "已核正文被标为现稿");
+});
+Test("听书核心：旧版停在等待续接的存档，恢复到同一节点的提示处", () =>
+{
+    var pack = Load(); var s = new CoreSession(pack, ChapterOf(pack), ListeningBranchPolicy.First);
+    int notice = s.Items.ToList().FindIndex(i => i.Kind == ListeningItemKind.Notice && i.Notice.Contains(DeclaredNotice));
+    Check(notice > 0 && s.SeekItem(s.Items[notice - 1].Id) && s.MoveNext() && s.Current?.Id == s.Items[notice].Id, "找不到提示");
+    var snapshot = s.Capture(); snapshot.ItemId = "legacy-blocking-item"; snapshot.Fingerprint = "legacy";
+    var restored = new CoreSession(pack, ChapterOf(pack));
+    Check(restored.TryRestore(snapshot, out var reason), "恢复失败：" + reason);
+    Check(restored.Current?.NodeId == s.Items[notice].NodeId && restored.Current?.IsBlocking == false, "没有恢复到提示处");
+});
+
+// ───────── 听书：安卓真实适配层 ─────────
+Test("安卓听书：默认分支一路收听越过 38-1，不再显示“此处等待确认续接”", () =>
+{
+    var fixture = new Fixture(Load()); int option = 1;
+    Android.OS.Handler.Delayed.Clear();
+    var session = fixture.Open(() => option); session.JumpToSection(Section); session.Play();
+    Drain(() => session.Current == null || session.Current.SectionId != Section || session.HasBlockingNotice);
+    // 本章其他小节仍可能因真正缺资料而停；这里只要求 38-1 本身不再停。
+    Check(session.Current == null || session.Current.SectionId != Section, "没有离开 38-1：" + session.Status);
+    Console.WriteLine("   之后停在：" + (session.Current?.SectionId ?? "章末") + " · " + session.Current?.Text);
+    session.Stop();
+});
+Test("安卓听书：设为第二个选项后，默认分支存档按设置重建，分支页修改即时同步", () =>
+{
+    var fixture = new Fixture(Load()); int option = 1;
+    var session = fixture.Open(() => option);
+    Check(session.Policy == ListeningBranchPolicy.First, "初始不是第一个");
+    option = 2; session.ApplyDefaultBranchOption(2);
+    Check(session.Policy == ListeningBranchPolicy.Second && session.Status.Contains("第二个选项"), "修改未同步：" + session.Status);
+    session = fixture.Open(() => 1);
+    Check(session.Policy == ListeningBranchPolicy.First, "重开未按当前设置重建");
+    session.SetPolicy(ListeningBranchPolicy.Manual); session.ApplyDefaultBranchOption(2);
+    Check(session.Policy == ListeningBranchPolicy.Manual, "手动选择被默认分支设置覆盖");
+    session.Stop();
+});
+
+// ───────── 游戏伴音：真实导航器 ─────────
+Test("游戏伴音：默认分支序号——单选项菜单回落第一个，4 选项菜单第二个取第二项", () =>
+{
+    var pack = Load();
+    foreach (int n in new[] { 1, 2 })
+    {
+        var e = new PlaybackEngine(pack); Check(e.OpenGameMenu(P("menu-000"), Section), "无法定位 menu-000");
+        Check(DefaultBranchPolicy.TryChoice(e, n, out var o, out _) && o!.Id == P("route-000-00"), $"单选项菜单 n={n} 未回落第一个");
+        Check(DefaultBranchPolicy.EffectiveNumber(e.Current, n) == 1, "有效序号错误");
+        e = new PlaybackEngine(pack); Check(e.OpenGameMenu(P("menu-002"), Section), "无法定位 menu-002");
+        Check(DefaultBranchPolicy.TryChoice(e, n, out o, out _) && o!.Id == P(n == 2 ? "route-002-01" : "route-002-00"), $"4 选项菜单 n={n} 选错");
+    }
+});
+Test("游戏伴音：修复前现象复现——选项段尾 Next 进入无续接菜单的 Gap", () =>
+{
+    var pack = Load(); var e = new PlaybackEngine(pack);
+    Check(e.OpenGameMenu(P("menu-000"), Section), "无法定位"); e.Commit(P("menu-000")); e.SelectBranch(0);
+    while (e.Mode == RunMode.Following && e.CurrentId != Stall) e.Next(true);
+    Check(e.CurrentId == Stall, "没有走到停顿句");
+    e.Next(true);
+    Check(e.Mode == RunMode.Gap && e.Current!.ResumeMenuIds.Count == 0, "预期 Gap 且无续接菜单，实际 " + e.Mode);
+    Check(DeclaredContinuationPolicy.TryResolve(e, out var c) && c!.Target.Id == P("menu-001"), "Gap 处没有解析到登记的下一菜单");
+    Check(DeclaredContinuationPolicy.Follow(e, c) && e.Mode == RunMode.Choice && e.CurrentId == P("menu-001"), "无法按登记连接打开下一菜单");
+});
+Test("游戏伴音：段尾台词（推进前）即可解析登记续接，供自动播放/点按跟随直接进入下一菜单", () =>
+{
+    var pack = Load(); var e = new PlaybackEngine(pack);
+    Check(e.ConfirmGameLine(Stall) && e.Mode == RunMode.Following, "无法定位停顿句");
+    Check(DeclaredContinuationPolicy.TryResolve(e, out var c) && c!.Target.Id == P("menu-001"), "段尾台词没有解析到 menu-001");
+});
+Test("游戏伴音：现稿在此之后没有下一处时不解析（真实缺口，仍需 OCR / 手动定位）；现稿写到别处则按现稿续接", () =>
+{
+    var pack = Load(); pack.ById[P("route-000-00-return")].NextId = null;
+    var e = new PlaybackEngine(pack); Check(e.ConfirmGameLine(Stall), "无法定位");
+    Check(!DeclaredContinuationPolicy.TryResolve(e, out _), "未登记出口被解析");
+    pack = Load(); pack.ById[P("route-000-00-return")].NextId = P("menu-003");
+    e = new PlaybackEngine(pack); Check(e.ConfirmGameLine(Stall), "无法定位");
+    Check(DeclaredContinuationPolicy.TryResolve(e, out var c) && c!.Target.Id == P("menu-003"), "现稿跳接没有按现稿解析");
+});
+foreach (int number in new[] { 1, 2 })
+Test($"游戏伴音：默认分支 {number} 号自动推进走完 38-1（含嵌套饮品菜单），每个段尾都按登记连接续接", () =>
+{
+    var pack = Load(); var e = new PlaybackEngine(pack);
+    Check(e.OpenGameMenu(P("menu-000"), Section), "无法定位");
+    int guard = 0, continuations = 0, manualInteractions = 0; var heard = new List<string>();
+    while (guard++ < 2000 && !(e.Current?.Id.StartsWith(Common, StringComparison.Ordinal) ?? false))
+    {
+        if (e.Mode == RunMode.Choice)
+        {
+            var menu = e.Current!; e.Commit(menu.Id);
+            if (DefaultBranchPolicy.TryChoice(e, number, out var o, out _)) e.SelectBranch(e.AvailableOptions.FindIndex(x => x.Id == o!.Id));
+            else
+            {
+                // 正文未核的选项（menu-006/008 只有地点/操作标题）：自动播放出示确认卡，玩家确认后导航器拒绝进入（ReviewRoute），
+                // 现稿续接按包内写的目标继续。
+                var only = menu.Options[DefaultBranchPolicy.EffectiveNumber(menu, number) - 1]; Check(!only.BodyVerified, "意外的需确认菜单 " + menu.Id);
+                e.SelectBranch(e.AvailableOptions.FindIndex(x => x.Id == only.Id));
+                Check(e.Mode == RunMode.Choice && e.ReviewRoute == only.Id, "导航器未按原样拒绝未核正文");
+                Check(DeclaredContinuationPolicy.TryResolve(e, out var dc) && DeclaredContinuationPolicy.Follow(e, dc!), "未核正文没有按现稿续接");
+                manualInteractions++;
+            }
+            continue;
+        }
+        if (e.Mode == RunMode.Following && e.Current?.Kind == "line") heard.Add(e.CurrentId!);
+        if (DeclaredContinuationPolicy.TryResolve(e, out var c)) { continuations++; Check(DeclaredContinuationPolicy.Follow(e, c!), "续接失败"); continue; }
+        if (e.Mode is RunMode.Following or RunMode.Merge) { e.Next(true); continue; }
+        throw new Exception($"停在 {e.Mode} {e.CurrentId} {e.Notice}");
+    }
+    Check(e.Current?.Id.StartsWith(Common, StringComparison.Ordinal) == true, $"没有到达共同台词：{e.Mode} {e.CurrentId} guard={guard} heard={heard.Count} cont={continuations} 最后={string.Join(",", heard.TakeLast(3))}");
+    Check(manualInteractions == 2, "未核互动次数异常 " + manualInteractions);
+    Check(heard.Contains(Stall) && continuations >= 6, $"续接次数异常 {continuations}");
+    var drink = Option(pack, number == 2 ? "route-002-01" : "route-002-00");
+    Check(drink.LineIds.All(heard.Contains), "饮品选项与设定序号不符");
+    Console.WriteLine($"   默认 {number}：台词 {heard.Count} 句，登记续接 {continuations} 次，未核正文互动按现稿续接 {manualInteractions} 处");
+});
+
+// ───────── 选项正文“并联”（EX00 极地暗流 极光：复述句与回应句都直接接 gap，回应句无入边）─────────
+string parallelFile = Environment.GetEnvironmentVariable("PARALLEL_PACK") ?? "/workspace/pgrui/diag/allpacks/060.json";
+if (File.Exists(parallelFile))
+{
+    const string M = "bw-4c774e02a26a8e51-m000";
+    string Echo = "bw-4c774e02a26a8e51-l12a5ad20db3b4b1aad1a", Reply = "bw-4c774e02a26a8e51-l206a091c31d266647f6d";
+    Test("听书核心：选项正文并联时按 lineIds 补读孤立正文（复述句之后读到回应句），全部听取不变", () =>
+    {
+        var pack = Pack.Load(parallelFile); var chapter = pack.Chapters.First(c => c.Sections.Any(x => x.Id == pack.ById[M].SectionId));
+        foreach (var policy in new[] { ListeningBranchPolicy.First, ListeningBranchPolicy.Second })
+        {
+            var items = new CoreSession(pack, chapter.Id, policy).Items.ToList();
+            var line = policy == ListeningBranchPolicy.First ? (Echo, Reply) : ("bw-4c774e02a26a8e51-l9aa8fe37c04008cb0e0c", "bw-4c774e02a26a8e51-lc62e9f323cc401ab57d9");
+            int a = items.FindIndex(i => i.NodeId == line.Item1 && i.Kind == ListeningItemKind.Line), b = items.FindIndex(i => i.NodeId == line.Item2 && i.Kind == ListeningItemKind.Line);
+            Check(a >= 0 && b > a && items.Skip(a + 1).Take(b - a - 1).All(i => i.Kind == ListeningItemKind.Notice), $"{policy}：回应句没有紧接复述句读到");
+        }
+        var all = new CoreSession(pack, chapter.Id, ListeningBranchPolicy.All).Items.ToList();
+        Check(all.Count(i => i.NodeId == Reply && i.Kind == ListeningItemKind.Line) == 1, "全部听取重复或漏读");
+    });
+    Test("游戏伴音：选项正文并联时复述句之后按现稿续接到回应句", () =>
+    {
+        var pack = Pack.Load(parallelFile); var e = new PlaybackEngine(pack);
+        Check(e.OpenGameMenu(M, pack.ById[M].SectionId), "无法定位菜单"); e.Commit(M); e.SelectBranch(0);
+        Check(DeclaredContinuationPolicy.TryResolve(e, out var c) && c!.Target.Id == Echo && DeclaredContinuationPolicy.Follow(e, c), "未核正文选项没有接到复述句");
+        Check(DeclaredContinuationPolicy.TryResolve(e, out c) && c!.Target.Id == Reply, "复述句之后没有解析到孤立回应句");
+        Check(DeclaredContinuationPolicy.Follow(e, c) && e.CurrentId == Reply && e.Mode == RunMode.Following, "无法定位回应句");
+        // 回应句之后包内只写了无下一处的 gap：真实缺口，不解析续接（导航器按原样回到菜单 / 需定位）。
+        Check(!DeclaredContinuationPolicy.TryResolve(e, out _), "真实缺口被越过");
+    });
+}
+
+string allPacks = Environment.GetEnvironmentVariable("ALLPACKS_DIR") ?? "/workspace/pgrui/diag/allpacks";
+if (File.Exists(Path.Combine(allPacks, "034.json")))
+    Test("并联补读只补接同一出口的孤立句：35-6 N0347（原表不可达的残留）不被补进", () =>
+    {
+        var pack = Pack.Load(Path.Combine(allPacks, "034.json"));
+        const string Orphan = "ch35-a29833021296d79bd3b3-6c32ddbf761565ba925d";
+        Check(pack.ById.ContainsKey(Orphan), "缺 N0347");
+        var option = pack.Nodes.SelectMany(n => n.Options).First(o => o.Id == "ch35-a29833021296d79bd3b3-route-000-01");
+        foreach (var id in option.LineIds)
+            Check(OptionBodyOrder.NextOrphan(pack, pack.ById[id], _ => false)?.Id != Orphan, "N0347 被补读：" + id);
+        // 听书默认分支整节计划也不含 N0347。
+        var chapter = pack.Chapters.First(c => c.Sections.Any(x => x.Id == pack.ById[Orphan].SectionId));
+        foreach (var policy in new[] { ListeningBranchPolicy.First, ListeningBranchPolicy.Second })
+            Check(!new CoreSession(pack, chapter.Id, policy).Items.Any(i => i.NodeId == Orphan), "计划含 N0347：" + policy);
+    });
+if (File.Exists(Path.Combine(allPacks, "000.json")))
+    Test("游戏伴音：边界缺口之后的现稿链经过“等待游戏交互”缺口（唯一登记菜单）继续，1-8 走到“战斗结束”", () =>
+    {
+        var pack = Pack.Load(Path.Combine(allPacks, "000.json"));
+        var e = new PlaybackEngine(pack);
+        var menu = pack.Nodes.First(n => n.Kind == "choice" && n.Options.Any(o => o.Id == "bw-47b76354aa97f0b9-m001-o01"));
+        Check(e.OpenGameMenu(menu.Id, menu.SectionId), "无法打开菜单"); e.Commit(menu.Id);
+        e.SelectBranch(e.AvailableOptions.FindIndex(o => o.Id == "bw-47b76354aa97f0b9-m001-o01"));
+        for (int i = 0; i < 40 && e.Mode != RunMode.End && e.CurrentId != "bw-47b76354aa97f0b9-a00006"; i++)
+        {
+            if (DeclaredContinuationPolicy.TryResolve(e, out var c)) { Check(DeclaredContinuationPolicy.Follow(e, c!), "续接失败"); continue; }
+            if (e.Mode == RunMode.Choice) { e.Commit(e.CurrentId!); e.SelectBranch(0); continue; }
+            Check(e.Mode != RunMode.Gap, "停在缺口：" + e.CurrentId + " " + e.Notice);
+            e.Next(true);
+        }
+        Check(e.CurrentId == "bw-47b76354aa97f0b9-a00006", "未到达“战斗结束”：" + e.CurrentId);
+    });
+
+// ───────── 0.4.7 待配音（audioStatus "draft-missing" + audioReason "待配音"）与归档节点 ─────────
+Test("待配音 / 无配音（J）：分类与停留时长（每字 0.25 秒、至少 2 秒）；所有无音频台词都显示字幕停留（draft-missing 标待配音，其余标无配音），not-spoken 不朗读，纯标点仍为短停顿", () =>
+{
+    var pack = Load();
+    var line = pack.Nodes.First(n => n.Kind == "line" && !n.Archived && n.SectionId == Section && n.Text.Length > 3 && n.Text.Any(char.IsLetter));
+    line.Audio = null;
+    foreach (var other in new string?[] { null, "", "not-found", "generation-failed", "review", "unbound", "pending-voice" })
+    {
+        line.AudioStatus = other;
+        Check(PendingVoice.Classify(pack, line) == AudioKind.NoVoice && PendingVoice.IsFlagged(line) && PendingVoice.Tag(line) == "无配音 · ", "其他状态的无音频台词没有按无配音停留：" + other);
+    }
+    line.AudioStatus = "not-spoken";
+    Check(PendingVoice.Classify(pack, line) == AudioKind.NotSpoken && !PendingVoice.IsFlagged(line), "not-spoken 被当成要停留的台词");
+    Check(PendingVoice.Status == "draft-missing", "待配音没有沿用 draft-missing");
+    line.AudioStatus = "draft-missing"; line.AudioReason = "待配音";
+    Check(PendingVoice.Classify(pack, line) == AudioKind.PendingVoice && PendingVoice.Applies(pack, line), "带标记的台词没有按待配音处理");
+    var punct = new Node { Id = "p", SectionId = Section, Kind = "line", Text = "……", AudioStatus = PendingVoice.Status };
+    Check(PendingVoice.Classify(pack, punct) == AudioKind.Punctuation && !PendingVoice.IsFlagged(punct), "纯标点句不再是短停顿");
+    Check(PendingVoice.DwellMilliseconds("你好") == 2000 && PendingVoice.DwellMilliseconds(new string('字', 20)) == 5000 && PendingVoice.DwellMilliseconds("一 二 三 四 五 六 七 八 九") == 2250, "停留时长计算错误");
+    var archived = new Node { Id = "a", SectionId = Section, Kind = "line", Text = "归档句", AudioStatus = PendingVoice.Status, Archived = true };
+    Check(!PendingVoice.IsFlagged(archived), "归档句被当成待配音");
+});
+Test("游戏自动播放：待配音句按字数停留（不暂停），停留未到不能推进，到时进入点击下一句；纯标点仍为 1.2 秒", () =>
+{
+    var cycle = new AutoPlaybackCycle(); cycle.Start("x", 0); long ep = cycle.Epoch;
+    Check(cycle.PreparePlayback(ep, "x", 0), "无法开始");
+    int dwell = PendingVoice.DwellMilliseconds("这是一句还没有录音的台词，共有二十个字左右吧。");
+    Check(cycle.BeginSilentPause(ep, "x", 1000, dwell) && cycle.Phase == AutoPlaybackPhase.SilentPause, "待配音停留没有开始");
+    Check(!cycle.CompleteSilentPause(ep, "x", 1000 + dwell - 1), "停留未到就推进");
+    Check(cycle.CompleteSilentPause(ep, "x", 1000 + dwell) && cycle.Phase == AutoPlaybackPhase.Tapping, "停留到时没有进入点击下一句");
+    var c2 = new AutoPlaybackCycle(); c2.Start("y", 0); Check(c2.PreparePlayback(c2.Epoch, "y", 0) && c2.BeginSilentPause(c2.Epoch, "y", 0), "标点停顿失败");
+    Check(c2.SilentPauseUntil == AutoPlaybackCycle.SilentPauseMilliseconds, "纯标点停顿时长改变");
+});
+Test("安卓听书：带待配音标记的无音频台词不跳过、不暂停——显示字幕、状态行以“待配音 · ”开头，停留后自动进入下一句", () =>
+{
+    var pack = Load();
+    var items = new CoreSession(pack, ChapterOf(pack), ListeningBranchPolicy.First).Items.Where(i => i.SectionId == Section && i.Kind == ListeningItemKind.Line).ToList();
+    var target = pack.ById[items[0].NodeId]; target.AudioStatus = "draft-missing"; target.AudioReason = "待配音"; target.Audio = null;
+    Android.OS.Handler.Delayed.Clear();
+    var fixture = new Fixture(pack); var session = fixture.Open(() => 1); session.JumpToSection(Section); session.Play();
+    Check(session.Current?.Id == target.Id && session.IsPlaying, "没有停留在待配音句：" + session.Current?.Id + " " + session.Status);
+    Check(session.Status.StartsWith("待配音 · ", StringComparison.Ordinal), "状态行没有“待配音 · ”：" + session.Status);
+    var dwell = Android.OS.Handler.Delayed.LastOrDefault(d => d.Delay >= 2000);
+    Check(dwell.Action != null && dwell.Delay == PendingVoice.DwellMilliseconds(target.Text), "没有按字数排定停留：" + dwell.Delay);
+    dwell.Action!();
+    Check(session.Current?.Id != target.Id, "停留结束后没有进入下一句");
+    session.Stop();
+});
+foreach (var otherStatus in new string?[] { null, "not-found" })
+Test("安卓听书（J，原“未标记缺音停下 / 跳过”已翻转）：其他状态（" + (otherStatus ?? "未设置") + "）的无音频台词同样显示字幕、状态行以“无配音 · ”开头，按字数停留后继续", () =>
+{
+    var pack = Load();
+    var items = new CoreSession(pack, ChapterOf(pack), ListeningBranchPolicy.First).Items.Where(i => i.SectionId == Section && i.Kind == ListeningItemKind.Line).ToList();
+    var target = pack.ById[items[0].NodeId]; target.Audio = null; target.AudioStatus = otherStatus;
+    Android.OS.Handler.Delayed.Clear();
+    var fixture = new Fixture(pack); var session = fixture.Open(() => 1); session.JumpToSection(Section); session.Play();
+    Check(session.Current?.Id == target.Id && session.IsPlaying, "无配音台词被跳过或停下：" + session.Current?.Id + " " + session.Status);
+    Check(session.Status.StartsWith("无配音 · ", StringComparison.Ordinal), "状态行没有“无配音 · ”：" + session.Status);
+    var dwell = Android.OS.Handler.Delayed.LastOrDefault(d => d.Delay >= 2000);
+    Check(dwell.Action != null && dwell.Delay == PendingVoice.DwellMilliseconds(target.Text), "没有按字数排定停留：" + dwell.Delay);
+    dwell.Action!(); Check(session.Current?.Id != target.Id, "停留结束后没有进入下一句");
+    Check(PlaybackLog.Recent.Any(r => r.Contains(",无配音越过,") && r.Contains(target.Id)), "播放记录没有“无配音越过”");
+    session.Stop();
+});
+
+// ───────── 0.4.7 仅字幕（audioStatus "subtitle-only" + audioReason「仅字幕」，没有 audio / audioBinding / audioEvidence）─────────
+// 显示字幕、按待配音同一公式停留后继续；不标「待配音 / 无配音」签，不算缺句 / 待补；播放记录记「仅字幕越过」。
+string subtitleFile = File.Exists("SubtitleOnly.pack.json") ? Path.GetFullPath("SubtitleOnly.pack.json")
+    : "/workspace/build/rel047/android/Tests/ListeningDefaultBranch/SubtitleOnly.pack.json";
+Test("仅字幕（合成包：仅字幕 / 待配音 / 无配音各一句）：加载通过；分类 SubtitleOnly；无签、不算缺失；停留公式同待配音；剩余时长计入停留；游戏自动播放按字数停留不暂停", () =>
+{
+    var pack = Pack.Load(subtitleFile); const string S = "sub-sec";
+    Node so = pack.ById[S + "-so"], dm = pack.ById[S + "-dm"], nf = pack.ById[S + "-nf"], end = pack.ById[S + "-s9"];
+    Check(PendingVoice.Classify(pack, so) == AudioKind.SubtitleOnly && PendingVoice.Classify(pack, dm) == AudioKind.PendingVoice && PendingVoice.Classify(pack, nf) == AudioKind.NoVoice, "分类错误");
+    Check(PendingVoice.IsFlagged(so) && PendingVoice.Applies(pack, so), "仅字幕没有按字数停留");
+    Check(PendingVoice.Tag(so) == "" && PendingVoice.VoiceTag(so) == null && PendingVoice.Tag(dm) == "待配音 · " && PendingVoice.VoiceTag(dm) == "待配音" && PendingVoice.VoiceTag(nf) == "无配音", "签错误");
+    Check(PendingVoice.PassType(so) == PlaybackLog.Types.SubtitleOnlyPass && PlaybackLog.Types.SubtitleOnlyPass == "仅字幕越过" && PendingVoice.PassType(dm) == PlaybackLog.Types.PendingVoicePass && PendingVoice.PassType(nf) == PlaybackLog.Types.NoVoicePass, "播放记录类型错误");
+    Check(!PendingVoice.CountsAsMissing(so) && !PendingVoice.CountsAsMissing(end) && PendingVoice.CountsAsMissing(dm) && PendingVoice.CountsAsMissing(nf), "缺失统计错误");
+    Check(PendingVoice.Notice(pack, so) == PendingVoice.SubtitleOnlyNotice && !PendingVoice.Notice(pack, so).Contains("缺") && PendingVoice.Notice(pack, dm).Length > 0, "提示文字错误：" + PendingVoice.Notice(pack, so));
+    Check(pack.Nodes.Count(PendingVoice.CountsAsMissing) == 2, "待补统计错误");
+    var core = new CoreSession(pack, "sub", ListeningBranchPolicy.First);
+    var cache = new ListeningRemainingTimeCache(); var t = cache.Estimate(pack, core.Items, 0, 0);
+    for (int i = 0; i < 200 && t.Loading; i++) { Thread.Sleep(10); t = cache.Estimate(pack, core.Items, 0, 0); }
+    long want = new[] { so, dm, nf, end }.Sum(n => (long)PendingVoice.DwellMilliseconds(n.Text));
+    Check(t.KnownMilliseconds == want && t.MissingFiles == 0, $"剩余时长 {t.KnownMilliseconds}（预期 {want}），缺 {t.MissingFiles}");
+    var cycle = new AutoPlaybackCycle(); cycle.Start(so.Id, 0);
+    Check(cycle.PreparePlayback(cycle.Epoch, so.Id, 0) && cycle.BeginSilentPause(cycle.Epoch, so.Id, 0, PendingVoice.DwellMilliseconds(so.Text)) && cycle.Phase == AutoPlaybackPhase.SilentPause, "游戏自动播放仅字幕没有按字数停留");
+    Check(cycle.CompleteSilentPause(cycle.Epoch, so.Id, PendingVoice.DwellMilliseconds(so.Text)) && cycle.Phase == AutoPlaybackPhase.Tapping, "停留到时没有继续点击下一句");
+    Console.WriteLine($"   仅字幕停留 {PendingVoice.DwellMilliseconds(so.Text)} ms；剩余时长 {t.DisplayText}");
+});
+Test("仅字幕：两个加载入口都接受 subtitle-only——Pack.Load 与章节 ZIP 导入（PackageRepository.ImportAsync，逐句音频校验跳过无 audio 的句子）", () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "subonly-import-" + Environment.ProcessId);
+    try
+    {
+        Directory.CreateDirectory(root);
+        var zip = new MemoryStream();
+        using (var archive = new System.IO.Compression.ZipArchive(zip, System.IO.Compression.ZipArchiveMode.Create, true))
+        using (var w = new StreamWriter(archive.CreateEntry("sub/pack.json").Open())) w.Write(File.ReadAllText(subtitleFile));
+        zip.Position = 0;
+        var repo = new PgrVoice.Packages.PackageRepository(Path.Combine(root, "lib"));
+        var installed = repo.ImportAsync(zip).GetAwaiter().GetResult();
+        var pack = repo.Load(installed.PackId);
+        Check(installed.PackId == "synthetic-subtitle-only" && pack.ById["sub-sec-so"].AudioStatus == PendingVoice.SubtitleOnlyStatus && pack.ById["sub-sec-so"].AudioReason == "仅字幕", "导入后状态丢失");
+    }
+    finally { try { Directory.Delete(root, true); } catch { } }
+});
+Test("安卓听书：仅字幕句显示字幕、无签、按字数停留后继续；待配音 / 无配音照旧；播放记录 仅字幕越过 / 待配音越过 / 无配音越过 各一；全程不停", () =>
+{
+    var pack = Pack.Load(subtitleFile); const string S = "sub-sec";
+    Android.OS.Handler.Delayed.Clear(); PlaybackLog.Recent.Clear();
+    var fixture = new Fixture(pack); var session = fixture.Open(() => 1, "sub"); session.JumpToSection(S); session.Play();
+    var seen = new List<(string Id, string Status, string? Tag)>();
+    for (int i = 0; i < 6 && session.Current is { } cur && cur.SectionId == S; i++)
+    {
+        Check(session.IsPlaying, "停下了：" + cur.Id + " " + session.Status);
+        seen.Add((cur.Id, session.Status, session.VoiceTagFor(cur)));
+        var dwell = Android.OS.Handler.Delayed.LastOrDefault(d => d.Delay >= 2000);
+        Check(dwell.Action != null && dwell.Delay == PendingVoice.DwellMilliseconds(cur.Text), cur.Id + " 没有按字数排定停留：" + dwell.Delay);
+        Android.OS.Handler.Delayed.Clear(); dwell.Action!();
+    }
+    var so = seen.First(x => x.Id == S + "-so"); var dm = seen.First(x => x.Id == S + "-dm"); var nf = seen.First(x => x.Id == S + "-nf");
+    Check(so.Tag == null && !so.Status.Contains("待配音") && !so.Status.Contains("无配音") && !so.Status.Contains("缺"), "仅字幕出现签 / 缺失字样：" + so.Status);
+    Check(dm.Tag == "待配音" && dm.Status.StartsWith("待配音 · ") && nf.Tag == "无配音" && nf.Status.StartsWith("无配音 · "), "待配音 / 无配音签变了：" + dm.Status + " / " + nf.Status);
+    var rows = PlaybackLog.Recent.ToList();
+    Check(rows.Count(r => r.Contains(",仅字幕越过,")) == 2 && rows.Any(r => r.Contains(",仅字幕越过,") && r.Contains(S + "-so")) && rows.Count(r => r.Contains(",待配音越过,")) == 1 && rows.Count(r => r.Contains(",无配音越过,")) == 1,
+        "播放记录：" + string.Join(" | ", rows.Where(r => r.Contains("越过"))));
+    Console.WriteLine("   " + string.Join("；", seen.Select(x => x.Id[(S.Length + 1)..] + "「" + x.Status + "」签=" + (x.Tag ?? "无"))));
+    session.Stop();
+});
+
+// 0.4.7 紧急：未核出口处「下一句」必须可点，立刻按顺序续接（与倒计时相同）；打开章节停在未核出口时不必先点播放。
+Test("安卓听书（I）：停在未核出口时点「下一句」立刻按顺序续接，并显示「此处分支续接未核实，已按顺序继续」；按钮路径不依赖先点播放", () =>
+{
+    string cur = Environment.GetEnvironmentVariable("CURPACKS_DIR") ?? "/workspace/pgrui/diag/allpacks-cur";
+    string file = Path.Combine(cur, "062.json");
+    if (!File.Exists(file)) { Console.WriteLine("SKIP no 062.json"); return; }
+    var pack = Pack.Load(file);
+    var walk = new CoreSession(pack, pack.Chapters[0].Id, ListeningBranchPolicy.First);
+    string? stopId = null; string? lineId = null;
+    for (int g = 0; g < 80000 && walk.Current is { } item; g++)
+    {
+        if (item.Kind == ListeningItemKind.Choice) { walk.Choose(item.Options![0].Id); continue; }
+        if (item.IsBlocking)
+        {
+            var stop = walk.ResolveStop(1)!;
+            if (stop.Action == ListeningStopAction.OrderContinue && stop.LineId != null)
+            { stopId = item.Id; lineId = stop.LineId; break; }
+            walk.ApplyStop(stop); continue;
+        }
+        walk.MoveNext();
+    }
+    Check(stopId != null, "EX02 没有可用的 OrderContinue 停下处");
+    Android.OS.Handler.Delayed.Clear();
+    var fixture = new Fixture(pack); var session = fixture.Open(() => 1, pack.Chapters[0].Id);
+    Check(session.SeekListeningItem(stopId!), "无法定位到未核出口");
+    Check(session.HasBlockingNotice, "定位后不是等待续接：" + session.Status);
+    session.Next();
+    Check(!session.HasBlockingNotice, "下一句没有越过未核出口：" + session.Status);
+    Check(session.AutoNotice == ListeningText.OrderContinued || session.Status.Contains(ListeningText.OrderContinued)
+        || session.Current?.Id == lineId, "没有按顺序续接或提示：" + session.Status + " / " + session.AutoNotice);
+    session.Stop();
+});
+Test("安卓听书（I）：下一句按顺序续接后，真的读到续接台词（停留后才到下一处停下），不是直接跳到小节已读完", () =>
+{
+    string file = "/workspace/fixture047/probe/062.json";
+    if (!File.Exists(file)) { Console.WriteLine("SKIP fixture"); return; }
+    var pack = Pack.Load(file);
+    string gap = pack.Chapters[0].Id; // unused
+    var fixture = new Fixture(pack); var session = fixture.Open(() => 1, pack.Chapters[0].Id);
+    string? stopId = session.Items.FirstOrDefault(i => i.Id.StartsWith("notice:bw-158b388dea7d75aa-m000-o00-gap:"))?.Id;
+    Check(stopId != null, "fixture 没有 EX02-3 m000 缺口");
+    Android.OS.Handler.Delayed.Clear();
+    Check(session.SeekListeningItem(stopId!), "无法定位");
+    session.Next();
+    var seen = new List<string>();
+    for (int i = 0; i < 50 && !session.HasBlockingNotice; i++)
+    {
+        if (session.CurrentItem is { Kind: ListeningItemKind.Line } li && (seen.Count == 0 || seen[^1] != li.NodeId)) seen.Add(li.NodeId);
+        var d = Android.OS.Handler.Delayed.FirstOrDefault(x => x.Delay >= 2000);
+        if (d.Action == null) break;
+        Android.OS.Handler.Delayed.Remove(d); d.Action();
+    }
+    Console.WriteLine("   续接后读到：" + string.Join(" → ", seen.Select(id => pack.ById[id].Speaker + "：" + pack.ById[id].Text)));
+    Check(seen.Count >= 1, "按顺序续接后一句都没读就停下：" + session.Status);
+    session.Stop();
+});
+Test("安卓听书（I）：未核出口 15 秒倒计时结束后按顺序续接", () =>
+{
+    string cur = Environment.GetEnvironmentVariable("CURPACKS_DIR") ?? "/workspace/pgrui/diag/allpacks-cur";
+    string file = Path.Combine(cur, "062.json");
+    if (!File.Exists(file)) { Console.WriteLine("SKIP no 062.json"); return; }
+    var pack = Pack.Load(file);
+    var walk = new CoreSession(pack, pack.Chapters[0].Id, ListeningBranchPolicy.First);
+    string? stopId = null; string? lineId = null;
+    for (int g = 0; g < 80000 && walk.Current is { } item; g++)
+    {
+        if (item.Kind == ListeningItemKind.Choice) { walk.Choose(item.Options![0].Id); continue; }
+        if (item.IsBlocking)
+        {
+            var stop = walk.ResolveStop(1)!;
+            if (stop.Action == ListeningStopAction.OrderContinue) { stopId = item.Id; lineId = stop.LineId; break; }
+            walk.ApplyStop(stop); continue;
+        }
+        walk.MoveNext();
+    }
+    Check(stopId != null, "没有 OrderContinue");
+    Android.OS.Handler.Delayed.Clear();
+    var fixture = new Fixture(pack); var session = fixture.Open(() => 1, pack.Chapters[0].Id);
+    Check(session.SeekListeningItem(stopId!), "无法定位");
+    session.Play();
+    Check(session.CountdownRemaining == ListeningText.CountdownSeconds || session.Status.Contains("秒后按顺序继续"), "没有开始倒计时：" + session.Status + " rem=" + session.CountdownRemaining);
+    for (int t = 0; t < 20 && session.HasBlockingNotice; t++)
+    {
+        var tick = Android.OS.Handler.Delayed.FirstOrDefault(d => d.Delay == 1000);
+        Check(tick.Action != null, "倒计时 tick 丢失 at " + t);
+        Android.OS.Handler.Delayed.Remove(tick); tick.Action!();
+    }
+    Check(!session.HasBlockingNotice, "倒计时结束仍停在未核出口：" + session.Status);
+    Check(session.AutoNotice == ListeningText.OrderContinued || session.Status.Contains(ListeningText.OrderContinued)
+        || session.Current?.Id == lineId, "倒计时后没有按顺序续接提示：" + session.Status + " / " + session.AutoNotice);
+    session.Stop();
+});
+
+Test("安卓听书（0.4.8 设计稿 16）：倒计时「暂停 / 继续」——暂停保留剩余秒数、旧回调失效；继续用新 token 计时；取消清除暂停；换会话后旧回调不动作", () =>
+{
+    string cur = Environment.GetEnvironmentVariable("CURPACKS_DIR") ?? "/workspace/pgrui/diag/allpacks-cur";
+    string file = Path.Combine(cur, "062.json");
+    if (!File.Exists(file)) { Console.WriteLine("SKIP no 062.json"); return; }
+    var pack = Pack.Load(file);
+    var walk = new CoreSession(pack, pack.Chapters[0].Id, ListeningBranchPolicy.First);
+    string? stopId = null;
+    for (int g = 0; g < 80000 && walk.Current is { } item; g++)
+    {
+        if (item.Kind == ListeningItemKind.Choice) { walk.Choose(item.Options![0].Id); continue; }
+        if (item.IsBlocking)
+        {
+            var stop = walk.ResolveStop(1)!;
+            if (stop.Action == ListeningStopAction.OrderContinue) { stopId = item.Id; break; }
+            walk.ApplyStop(stop); continue;
+        }
+        walk.MoveNext();
+    }
+    Check(stopId != null, "没有 OrderContinue");
+    (Action Action, long Delay) NextTick() { var t = Android.OS.Handler.Delayed.LastOrDefault(d => d.Delay == 1000); Check(t.Action != null, "缺少 1 秒 tick"); Android.OS.Handler.Delayed.Remove(t); return t; }
+    Android.OS.Handler.Delayed.Clear();
+    var fixture = new Fixture(pack); var session = fixture.Open(() => 1, pack.Chapters[0].Id);
+    Check(session.SeekListeningItem(stopId!), "无法定位"); session.Play();
+    Check(session.CountdownRemaining == ListeningText.CountdownSeconds && !session.CountdownPaused, "没有开始倒计时：" + session.CountdownRemaining);
+    for (int i = 0; i < 3; i++) NextTick().Action();
+    Check(session.CountdownRemaining == ListeningText.CountdownSeconds - 3, "tick 后剩余秒数不对：" + session.CountdownRemaining);
+    var stale = NextTick();                       // 暂停前已排定的下一个 tick
+    session.ToggleCountdownPause();
+    Check(session.CountdownPaused && session.CountdownRemaining == 12 && session.HasBlockingNotice, "暂停后状态不对");
+    Check(session.Status.StartsWith("已暂停") && session.Status.Contains("按顺序继续"), "暂停文案不对：" + session.Status);
+    stale.Action();                               // 旧 token 的 tick 不得再减秒或自动续接
+    Check(session.CountdownRemaining == 12 && session.HasBlockingNotice && !Android.OS.Handler.Delayed.Any(d => d.Delay == 1000), "暂停后旧 tick 仍在计时：" + session.CountdownRemaining);
+    session.ToggleCountdownPause();               // 继续：从 12 秒用新 token 计时
+    Check(!session.CountdownPaused && session.CountdownRemaining == 12 && !session.Status.StartsWith("已暂停"), "继续后状态不对：" + session.Status);
+    stale.Action();
+    Check(session.CountdownRemaining == 12, "继续后旧 tick 又生效：" + session.CountdownRemaining);
+    NextTick().Action();
+    Check(session.CountdownRemaining == 11, "继续后没有接着倒数：" + session.CountdownRemaining);
+    // 暂停后直接点「按顺序继续」：立即生效，暂停态清除。
+    var resumed = NextTick();
+    session.ToggleCountdownPause(); Check(session.CountdownPaused, "第二次暂停失败");
+    session.ApplyPendingStop();
+    Check(!session.CountdownPaused && session.CountdownRemaining == 0 && !session.HasBlockingNotice, "按顺序继续后暂停态未清：" + session.Status);
+    resumed.Action(); Check(!session.CountdownPaused && session.CountdownRemaining == 0, "旧 tick 在续接后动作");
+    session.Stop();
+    // 换会话：旧会话（暂停→继续后）的 tick 不得作用于新打开的会话。
+    Android.OS.Handler.Delayed.Clear();
+    var first = fixture.Open(() => 1, pack.Chapters[0].Id);
+    Check(first.SeekListeningItem(stopId!), "无法定位"); first.Play();
+    first.ToggleCountdownPause(); first.ToggleCountdownPause();
+    var old = NextTick();
+    first.Open(pack.Id, pack.Chapters[0].Id);     // 重新打开章节（新 core）
+    int before = first.CountdownRemaining; bool blocking = first.HasBlockingNotice;
+    old.Action();
+    Check(first.CountdownRemaining == before && first.HasBlockingNotice == blocking && !first.CountdownPaused, $"旧会话 tick 作用到新会话：{before}→{first.CountdownRemaining}");
+    first.Stop();
+});
+
+Test("安卓听书（0.4.8 设计稿 16，与电脑版一致）：待选支线倒计时中主播放键与卡片「暂停 / 继续」同一状态同一操作，主键「继续」从停住秒数接着倒计时、不结束不跳过", () =>
+{
+    var fixture = new Fixture(Load());
+    Android.OS.Handler.Delayed.Clear();
+    var session = fixture.Open(() => 1);
+    session.SetPolicy(ListeningBranchPolicy.Manual); session.JumpToSection(Section); session.Play();
+    Drain(() => session.Choices.Count > 0);
+    Check(session.Choices.Count > 0 && session.CountdownRemaining == ListeningText.CountdownSeconds && session.CountdownOptionId != null, "没有停在待选支线倒计时：" + session.Status);
+    var choiceItem = session.CurrentItem; string? autoId = session.CountdownOptionId;
+    (Action Action, long Delay) NextTick() { var t = Android.OS.Handler.Delayed.LastOrDefault(d => d.Delay == 1000); Check(t.Action != null, "缺少 1 秒 tick"); Android.OS.Handler.Delayed.Remove(t); return t; }
+    // 进行中：主键与卡片都是「暂停」，主键可用（原来待选支线时主键禁用）。
+    Check(session.PlayTogglesCountdown && session.PlayEnabled && session.PlayCaption == "暂停" && session.PlayShowsPauseIcon && !session.CountdownPaused, "倒计时中主键状态不对：" + session.PlayCaption);
+    NextTick().Action(); NextTick().Action();
+    Check(session.CountdownRemaining == 13, "tick 不对：" + session.CountdownRemaining);
+    // 卡片「暂停」→ 主键显示「继续」。
+    session.ToggleCountdownPause();
+    Check(session.CountdownPaused && session.PlayCaption == "继续" && !session.PlayShowsPauseIcon && session.PlayEnabled, "卡片暂停后主键不是「继续」：" + session.PlayCaption);
+    foreach (var stale in Android.OS.Handler.Delayed.Where(d => d.Delay == 1000).ToList()) { Android.OS.Handler.Delayed.Remove(stale); stale.Action(); }
+    Check(session.CountdownRemaining == 13 && ReferenceEquals(session.CurrentItem, choiceItem), "暂停期间秒数变化或已自动选择");
+    // 主键「继续」：从 13 秒接着倒计时，与卡片「继续」相同；不结束、不跳过、不开始收听。
+    Check(!session.PlayButton(), "主键「继续」开始了收听");
+    Check(!session.CountdownPaused && session.CountdownRemaining == 13 && session.Choices.Count > 0 && ReferenceEquals(session.CurrentItem, choiceItem) && session.CountdownOptionId == autoId && !session.IsPlaying,
+        "主键「继续」结束或跳过了倒计时：" + session.Status);
+    Check(session.PlayCaption == "暂停" && session.PlayShowsPauseIcon, "主键继续后两处没回到「暂停」");
+    NextTick().Action();
+    Check(session.CountdownRemaining == 12, "主键继续后没有接着倒数：" + session.CountdownRemaining);
+    // 主键「暂停」= 卡片「暂停」（冻结，不取消）；卡片「继续」后主键同步回「暂停」。
+    session.PlayButton();
+    Check(session.CountdownPaused && session.CountdownRemaining == 12 && session.PendingStop != null && session.PlayCaption == "继续", "主键暂停取消了倒计时或状态不同步");
+    session.ToggleCountdownPause();
+    Check(!session.CountdownPaused && session.CountdownRemaining == 12 && session.PlayCaption == "暂停", "卡片继续后主键没同步");
+    // 到点仍按默认项自动选择（说明暂停 / 继续没有破坏倒计时）。
+    for (int t = 0; t < 20 && ReferenceEquals(session.CurrentItem, choiceItem); t++) NextTick().Action();
+    Check(!ReferenceEquals(session.CurrentItem, choiceItem) && session.AutoNotice?.StartsWith(ListeningText.AutoSelected) == true, "到点没有自动选择：" + session.Status);
+    Check(!session.PlayTogglesCountdown, "倒计时结束后主键仍在控制倒计时");
+    session.Stop();
+});
+
+// 0.4.8 审稿必须改 1 / 2：会取消已暂停倒计时、之后又变成不暂停的入口。暂停期间只有「继续」、选选项、上一句、跳小节解除暂停。
+(AndroidSession Session, ListeningItem Item, Func<(Action Action, long Delay)> Tick, Action<bool> SetAuto) CountdownAtBranch()
+{
+    var fixture = new Fixture(Load());
+    Android.OS.Handler.Delayed.Clear();
+    bool auto = true;
+    var session = fixture.Open(() => 1, null, () => auto);
+    session.SetPolicy(ListeningBranchPolicy.Manual); session.JumpToSection(Section); session.Play();
+    Drain(() => session.Choices.Count > 0);
+    Check(session.Choices.Count > 0 && session.CountdownRemaining == ListeningText.CountdownSeconds, "没有停在待选支线倒计时：" + session.Status);
+    (Action Action, long Delay) NextTick() { var t = Android.OS.Handler.Delayed.LastOrDefault(d => d.Delay == 1000); Check(t.Action != null, "缺少 1 秒 tick"); Android.OS.Handler.Delayed.Remove(t); return t; }
+    return (session, session.CurrentItem!, NextTick, v => auto = v);
+}
+void RunStale() { foreach (var stale in Android.OS.Handler.Delayed.Where(d => d.Delay == 1000).ToList()) { Android.OS.Handler.Delayed.Remove(stale); stale.Action(); } }
+
+Test("安卓听书（0.4.8 审稿必须改 1）：通知栏 / 锁屏 / 耳机键在倒计时中与主键、卡片同一状态——暂停冻结秒数不取消，「播放」=「继续」从停住秒数接着倒数，再按暂停仍保持", () =>
+{
+    var (session, item, tick, _) = CountdownAtBranch();
+    tick().Action(); tick().Action();
+    Check(session.CountdownRemaining == 13, "tick 不对");
+    // 通知栏 / 耳机「播放」在倒计时进行中不动。
+    session.MediaPlay();
+    Check(!session.CountdownPaused && session.CountdownRemaining == 13 && !session.IsPlaying && session.PendingStop != null, "进行中按「播放」改变了倒计时或开始收听");
+    // 「暂停」（MediaSession onPause / 耳机）= 卡片「暂停」。
+    session.MediaPause();
+    Check(session.CountdownPaused && session.CountdownRemaining == 13 && session.PendingStop != null && session.PlayCaption == "继续" && !session.PlayShowsPauseIcon, "通知栏暂停取消了倒计时：" + session.Status);
+    session.MediaPause(); session.Pause();
+    RunStale();
+    Check(session.CountdownPaused && session.CountdownRemaining == 13 && ReferenceEquals(session.CurrentItem, item), "已暂停时再按暂停改变了状态");
+    // 「播放」=「继续」：从 13 接着倒数，不新开 15 秒。
+    session.MediaPlay();
+    Check(!session.CountdownPaused && session.CountdownRemaining == 13 && session.PlayCaption == "暂停" && session.PlayShowsPauseIcon, "通知栏继续没有从停住秒数接着：" + session.CountdownRemaining);
+    tick().Action();
+    Check(session.CountdownRemaining == 12, "继续后没有接着倒数");
+    // 通知栏中间键 = 主播放键。
+    session.MediaToggle();
+    Check(session.CountdownPaused && session.CountdownRemaining == 12, "通知栏中间键与主键不同");
+    session.MediaToggle();
+    Check(!session.CountdownPaused && session.CountdownRemaining == 12, "通知栏中间键继续不对");
+    session.Stop();
+});
+
+Test("安卓听书（0.4.8 审稿必须改 2）：目录试听前的暂停、支线处「下一句」（移动失败）都不取消倒计时；已暂停保持暂停、进行中照常倒数", () =>
+{
+    var (session, item, tick, _) = CountdownAtBranch();
+    tick().Action();
+    // 目录「只试听这一句」先调 Pause()：进行中 → 冻结，已暂停 → 保持。
+    session.Pause();
+    Check(session.CountdownPaused && session.CountdownRemaining == 14 && session.PendingStop != null, "目录试听前的暂停取消了倒计时：" + session.Status);
+    // 支线处「下一句」：移动失败，倒计时不动（仍暂停、秒数不变、仍在同一停下处）。
+    session.Next();
+    RunStale();
+    Check(session.CountdownPaused && session.CountdownRemaining == 14 && ReferenceEquals(session.CurrentItem, item) && session.PendingStop != null && session.Choices.Count > 0, "「下一句」移动失败却动了倒计时：" + session.Status);
+    session.Play();
+    Check(session.CountdownPaused && session.CountdownRemaining == 14, "播放（非主键入口）解除了暂停");
+    // 进行中「下一句」失败：照常倒数，不取消。
+    session.ToggleCountdownPause();
+    session.Next();
+    Check(!session.CountdownPaused && session.CountdownRemaining == 14 && session.PendingStop != null, "进行中「下一句」取消了倒计时");
+    tick().Action();
+    Check(session.CountdownRemaining == 13, "进行中「下一句」后不再倒数");
+    session.Stop();
+});
+
+Test("安卓听书（0.4.8 审稿必须改 2）：暂停中切换「分支自动选择」——关闭即结束本次倒计时（停下等待、不自动重启），在同一停下处重新开启时恢复「已暂停」与停住秒数", () =>
+{
+    var (session, item, tick, setAuto) = CountdownAtBranch();
+    tick().Action(); tick().Action(); tick().Action();
+    session.ToggleCountdownPause();
+    Check(session.CountdownPaused && session.CountdownRemaining == 12, "暂停失败");
+    setAuto(false); session.BranchAutoSelectChanged();
+    RunStale();
+    Check(session.CountdownRemaining == 0 && !session.CountdownPaused && session.PendingStop != null && ReferenceEquals(session.CurrentItem, item), "关闭后没有停下等待");
+    Check(!Android.OS.Handler.Delayed.Any(d => d.Delay == 1000), "关闭后仍有倒计时回调");
+    setAuto(true); session.BranchAutoSelectChanged();
+    RunStale();
+    Check(session.CountdownPaused && session.CountdownRemaining == 12 && ReferenceEquals(session.CurrentItem, item) && session.PlayCaption == "继续", "重新开启后没有恢复已暂停 12 秒：" + session.CountdownRemaining + " paused=" + session.CountdownPaused);
+    session.PlayButton();
+    Check(!session.CountdownPaused && session.CountdownRemaining == 12, "恢复后「继续」不对");
+    tick().Action();
+    Check(session.CountdownRemaining == 11, "恢复后没有接着倒数");
+    // 进行中切换：关闭后开启 = 新的 15 秒（与原来相同）。
+    setAuto(false); session.BranchAutoSelectChanged(); setAuto(true); session.BranchAutoSelectChanged();
+    Check(!session.CountdownPaused && session.CountdownRemaining == ListeningText.CountdownSeconds, "进行中切换后没有重新倒数");
+    session.Stop();
+});
+
+Test("安卓听书（0.4.8 审稿必须改 2）：解除暂停的入口——选选项、上一句、跳小节结束本次倒计时；「继续」从停住秒数接着倒数", () =>
+{
+    var (session, item, tick, _) = CountdownAtBranch();
+    session.ToggleCountdownPause();
+    session.Previous();
+    Check(!ReferenceEquals(session.CurrentItem, item) && session.CountdownRemaining == 0 && !session.CountdownPaused, "上一句没有结束暂停的倒计时");
+    session.Stop();
+    (session, item, tick, _) = CountdownAtBranch();
+    session.ToggleCountdownPause();
+    session.Choose(session.Choices[0].Id);
+    Check(!ReferenceEquals(session.CurrentItem, item) && !session.CountdownPaused && session.Choices.Count == 0, "选选项没有解除暂停");
+    session.Stop();
+    (session, item, tick, _) = CountdownAtBranch();
+    session.ToggleCountdownPause();
+    session.JumpToSection(Section);
+    Check(!session.CountdownPaused || !ReferenceEquals(session.CurrentItem, item), "跳小节没有解除暂停");
+    session.Stop();
+});
+
+Test("安卓听书（0.4.8 复审必须改）：倒计时中（进行中 / 已暂停）重新打开章节、配音包更新、换小节都清掉倒计时与暂停，不留卡住的「已暂停 15」卡片", () =>
+{
+    foreach (string how in new[] { "Open", "PackageUpdated", "JumpToSection" })
+    foreach (bool pauseFirst in new[] { true, false })
+    {
+        var (session, _, _, _) = CountdownAtBranch();
+        if (pauseFirst) session.ToggleCountdownPause();
+        Check(session.CountdownRemaining > 0 && session.CountdownPaused == pauseFirst, "前提不对");
+        if (how == "Open") session.Open(session.Pack!.Id, session.Chapter!.Id);
+        else if (how == "PackageUpdated") session.PackageUpdated(session.Pack!.Id);
+        else session.JumpToSection(Section);
+        RunStale();
+        string tag = $"{how}（{(pauseFirst ? "已暂停" : "进行中")}）";
+        Check(!session.CountdownPaused, tag + "后仍是已暂停");
+        Check(session.CountdownRemaining == 0 || session.PendingStop != null && session.PlayTogglesCountdown, tag + $"后残留倒计时却不能操作：rem={session.CountdownRemaining} toggles={session.PlayTogglesCountdown}");
+        if (session.Choices.Count > 0 && session.CountdownRemaining == 0)
+        {
+            // 重开后停在选项处：与 0.4.7 起的重开行为一致，等待选择（不自动重新倒计时）；选项可点、选后照常继续。
+            string before = session.CurrentItem?.Id ?? "";
+            session.Choose(session.Choices[0].Id);
+            Check(session.Choices.Count == 0 || session.CurrentItem?.Id != before, tag + "后选项点了没反应");
+            session.Stop();
+            continue;
+        }
+        Check(session.PlayEnabled, tag + "后主按钮不可点：" + session.Status);
+        // 主按钮能把人带回可操作状态：再停到支线时是新的 15 秒倒计时，卡片「暂停 / 继续」有反应。
+        if (session.CountdownRemaining == 0) { session.Play(); Drain(() => session.Choices.Count > 0 && session.CountdownRemaining > 0); }
+        Check(session.CountdownRemaining == ListeningText.CountdownSeconds && !session.CountdownPaused, tag + $"后没有重新开始倒计时：rem={session.CountdownRemaining} {session.Status}");
+        session.ToggleCountdownPause();
+        Check(session.CountdownPaused, tag + "后卡片「暂停」没反应");
+        session.ToggleCountdownPause();
+        Check(!session.CountdownPaused, tag + "后卡片「继续」没反应");
+        session.Stop();
+    }
+});
+
+Test("归档节点：38-1 中一句被归档后，听书默认第一/第二与游戏伴音都不读它", () =>
+{
+    var pack = Load(); var archived = pack.ById[Stall]; archived.Archived = true;
+    foreach (var policy in new[] { ListeningBranchPolicy.First, ListeningBranchPolicy.Second, ListeningBranchPolicy.All })
+        Check(!new CoreSession(pack, ChapterOf(pack), policy).Items.Any(i => i.NodeId == Stall && i.Kind == ListeningItemKind.Line), "听书计划读到归档句：" + policy);
+    var e = new PlaybackEngine(pack); Check(e.OpenGameMenu(P("menu-000"), Section), "无法定位"); e.Commit(P("menu-000")); e.SelectBranch(0);
+    for (int guard = 0; guard < 400 && e.Mode != RunMode.End; guard++)
+    {
+        Check(!(e.CurrentId == Stall && e.Mode == RunMode.Following), "游戏伴音播放了归档句");
+        if (DeclaredContinuationPolicy.TryResolve(e, out var c)) { Check(c!.Target.Id != Stall, "续接目标是归档句"); if (!DeclaredContinuationPolicy.Follow(e, c)) break; continue; }
+        if (e.Mode == RunMode.Choice) { if (DefaultBranchPolicy.TryChoice(e, 1, out var o, out _)) { e.Commit(e.CurrentId!); e.SelectBranch(e.AvailableOptions.IndexOf(o!)); } else break; continue; }
+        if (e.Mode is RunMode.Following or RunMode.Merge) { e.Next(true); continue; }
+        break;
+    }
+});
+if (File.Exists(parallelFile))
+    Test("归档节点：并联补读（lineIds 规则）不补读归档句，游戏伴音也不以它为续接目标", () =>
+    {
+        const string M = "bw-4c774e02a26a8e51-m000";
+        string Echo = "bw-4c774e02a26a8e51-l12a5ad20db3b4b1aad1a", Reply = "bw-4c774e02a26a8e51-l206a091c31d266647f6d";
+        var pack = Pack.Load(parallelFile); pack.ById[Reply].Archived = true;
+        Check(OptionBodyOrder.NextOrphan(pack, pack.ById[Echo], _ => false)?.Id != Reply, "补读了归档句");
+        var chapter = pack.Chapters.First(c => c.Sections.Any(x => x.Id == pack.ById[M].SectionId));
+        foreach (var policy in new[] { ListeningBranchPolicy.First, ListeningBranchPolicy.Second, ListeningBranchPolicy.All })
+            Check(!new CoreSession(pack, chapter.Id, policy).Items.Any(i => i.NodeId == Reply), "听书计划含归档句：" + policy);
+        var e = new PlaybackEngine(pack);
+        Check(e.OpenGameMenu(M, pack.ById[M].SectionId), "无法定位菜单"); e.Commit(M); e.SelectBranch(0);
+        Check(DeclaredContinuationPolicy.TryResolve(e, out var c) && c!.Target.Id == Echo && DeclaredContinuationPolicy.Follow(e, c), "未核正文选项没有接到复述句");
+        Check(!DeclaredContinuationPolicy.TryResolve(e, out c) || c!.Target.Id != Reply, "续接到归档句");
+    });
+// dry-run 改包原样无法通过包校验（sync_segmentIds 把别路线的句子登记进已核选项的 segmentIds），这里用只撤回这些越界登记的分析副本。
+string dryFile = Environment.GetEnvironmentVariable("DRY_PACK_132") ?? "/workspace/pgrui/diag/allpacks-dryseg/132.json";
+if (File.Exists(dryFile))
+    Test("归档节点（dry-run 改包 神寂启示录 1955/1956）：所有小节、默认第一/第二/全部听都不读任何归档节点", () =>
+    {
+        var pack = Pack.Load(dryFile); int archived = pack.Nodes.Count(n => n.Archived);
+        Check(archived >= 7, "dry-run 包归档节点数异常：" + archived);
+        foreach (var chapter in pack.Chapters)
+            foreach (var policy in new[] { ListeningBranchPolicy.First, ListeningBranchPolicy.Second, ListeningBranchPolicy.All })
+                Check(!new CoreSession(pack, chapter.Id, policy).Items.Any(i => i.Node?.Archived == true || (i.NodeId != null && pack.ById.TryGetValue(i.NodeId, out var n) && n.Archived)), "读到归档节点：" + chapter.Id + " " + policy);
+    });
+
+// ───────── 0.4.7 菜单形态（C/D/E）、停下处（G/I/L）、播放记录（K）：当前 PC 配音包库的只读副本 ─────────
+string curPacks = Environment.GetEnvironmentVariable("CURPACKS_DIR") ?? "/workspace/pgrui/diag/allpacks-cur";
+string ChapterFor(Pack pack, string sectionId) => pack.Chapters.First(c => c.Sections.Any(x => x.Id == sectionId)).Id;
+if (File.Exists(Path.Combine(curPacks, "042.json")))
+    Test("单选项菜单（C）：ch43 43-02 海渊进攻计划（moviezx06902ba）——手动选择与默认分支都不在单选项菜单停下；游戏伴音识别为单选项", () =>
+    {
+        var pack = Pack.Load(Path.Combine(curPacks, "042.json")); const string Sec = "ZX06902BA";
+        var singles = pack.Nodes.Where(n => n.Kind == "choice" && !n.Archived && n.SectionId == Sec && n.Options.Count == 1).ToList();
+        Check(singles.Count > 0, "43-02 没有单选项菜单");
+        foreach (var policy in new[] { ListeningBranchPolicy.Manual, ListeningBranchPolicy.First, ListeningBranchPolicy.Second })
+        {
+            var core = new CoreSession(pack, ChapterFor(pack, Sec), policy);
+            Check(core.SeekSection(Sec), "无法定位 43-02");
+            for (int guard = 0; guard < 20000 && core.Current is { } item && item.SectionId == Sec; guard++)
+            {
+                Check(!(item.Kind == ListeningItemKind.Choice && item.Options?.Count == 1), "单选项菜单停下：" + policy);
+                if (item.Kind == ListeningItemKind.Choice) { core.Choose(item.Options![0].Id); continue; }
+                if (item.IsBlocking) { if (core.ResolveStop(1) is { } stop && core.ApplyStop(stop)) continue; break; }
+                core.MoveNext();
+            }
+            int auto = core.ChoicePoints.Count(c => c.SectionId == Sec && c.AutoKind == PlaybackLog.Types.SingleOption);
+            Check(auto > 0, "没有单选项自动继续记录：" + policy);
+            if (policy == ListeningBranchPolicy.Manual) Console.WriteLine($"   43-02 单选项菜单 {singles.Count} 个，手动选择计划中自动继续 {auto} 次");
+        }
+        int gameSingle = 0;
+        foreach (var menu in singles.Where(m => m.Options[0].Requires.Count == 0 && m.Options[0].Excludes.Count == 0))
+        {
+            var e = new PlaybackEngine(pack); if (!e.OpenGameMenu(menu.Id, Sec)) continue;
+            if (DefaultBranchPolicy.IsSingleOptionMenu(e)) { gameSingle++; Check(DefaultBranchPolicy.TryChoice(e, 2, out var o, out _) && o!.Id == menu.Options[0].Id, "单选项菜单未取唯一选项"); }
+        }
+        Check(gameSingle > 0, "游戏伴音没有识别单选项菜单");
+    });
+if (File.Exists(Path.Combine(curPacks, "028.json")))
+    Test("探索菜单（D）：29-1 厄潮 17 个回环菜单（含「再等等……」、3点/6点、角色子菜单内的话题回环）——每个回环选项只读一次，按列出顺序，之后取出口；无循环 / 过深停下", () =>
+    {
+        var pack = Pack.Load(Path.Combine(curPacks, "028.json")); const string Sec = "ch29-1dc1158611c810722709";
+        var menus = pack.Nodes.Where(n => n.Kind == "choice" && !n.Archived && n.SectionId == Sec && MenuShape.Of(pack, n).Exploration).ToList();
+        Check(menus.Count == 17, "29-1 探索菜单数 " + menus.Count);
+        // 角色子菜单：话题回到子菜单本身不算出口（menu-000 8 选项中 7 个回环；menu-019 1 回环 + 1 出口）。
+        var m0 = MenuShape.Of(pack, pack.ById[Sec + "-menu-000"]); Check(m0.Loops.Count == 7 && m0.Exits.Count == 1, $"menu-000 回环/出口 {m0.Loops.Count}/{m0.Exits.Count}");
+        var m19 = MenuShape.Of(pack, pack.ById[Sec + "-menu-019"]); Check(m19.Loops.Count == 1 && m19.Exits.Count == 1, $"menu-019 回环/出口 {m19.Loops.Count}/{m19.Exits.Count}");
+        foreach (var policy in new[] { ListeningBranchPolicy.First, ListeningBranchPolicy.Second, ListeningBranchPolicy.Manual })
+        {
+            var core = new CoreSession(pack, ChapterFor(pack, Sec), policy);
+            int guard = 0;
+            while (core.Current is { } item && guard++ < 20000)
+            {
+                Check(!(item.IsBlocking && item.WaitingKind == ListeningWaitingKind.TraversalLimit), policy + " 过深停下：" + item.Notice);
+                if (item.Kind == ListeningItemKind.Choice && policy == ListeningBranchPolicy.Manual) { core.Choose(item.Options![0].Id); continue; }
+                if (item.IsBlocking) { if (core.ResolveStop(1) is { } stop && core.ApplyStop(stop)) continue; break; }
+                core.MoveNext();
+            }
+            var lines = core.Items.Where(i => i.SectionId == Sec && i.Kind == ListeningItemKind.Line).Select(i => i.NodeId).ToList();
+            // 同回应隐藏只对 Movie 选择菜单（有原表 Action 或 19-14 白名单）生效；29-1 menu-020 / menu-000 是关卡行为树按钮菜单，不隐藏：仍为 342。
+            if (policy == ListeningBranchPolicy.First) Check(lines.Count == 342, "29-1 默认第一句数 " + lines.Count + "（预期 342）");
+            Check(lines.Count == lines.Distinct().Count(), policy + " 有台词重复读：" + string.Join(",", lines.GroupBy(x => x).Where(g => g.Count() > 1).Select(g => g.Key).Take(3)));
+            int explored = core.ChoicePoints.Count(c => c.SectionId == Sec && c.AutoKind == PlaybackLog.Types.Exploration);
+            Check(explored > 0, policy + " 没有探索菜单自动读");
+            var m20 = pack.ById[Sec + "-menu-020"]; var shape = MenuShape.Of(pack, m20);
+            var loopTargets = shape.Loops.Select(o => o.TargetId).ToList();
+            var idx = loopTargets.Select(t => lines.IndexOf(t!)).ToList();
+            if (idx.All(i => i >= 0)) Check(idx.SequenceEqual(idx.OrderBy(x => x)), policy + " 3点 / 6点没有按列出顺序读");
+            Console.WriteLine($"   {policy}：29-1 台词 {lines.Count} 句，探索菜单自动读 {explored} 次，menu-020 回环 {string.Join("/", idx)}");
+        }
+    });
+// 0.4.7 空回环：选项不经任何台词直接回到本菜单（如 29-1 menu-026「再等等……」）。读一遍即已读——不循环、不停下、不重复。
+string emptyLoopFile = File.Exists("EmptyLoop.pack.json") ? Path.GetFullPath("EmptyLoop.pack.json")
+    : "/workspace/build/rel047/android/Tests/ListeningDefaultBranch/EmptyLoop.pack.json";
+Test("探索菜单（空回环）：合成菜单「再等等……」(空回环) /「聊聊」(回环) /「离开营地」(出口)——听书各回环读一次后走出口，0 停 0 重复", () =>
+{
+    var pack = Pack.Load(emptyLoopFile); const string Sec = "syn-sec"; var menu = pack.ById[Sec + "-menu"];
+    var shape = MenuShape.Of(pack, menu);
+    Check(shape.Exploration && shape.Loops.Count == 2 && shape.Exits.Count == 1, $"形态 回环/出口 {shape.Loops.Count}/{shape.Exits.Count}");
+    Check(shape.EmptyLoops.Count == 1 && shape.EmptyLoops[0].Id == Sec + "-route-e", "空回环识别错误");
+    string[] expected = { "l0", "n1", "n2", "x1", "l9" };
+    foreach (var policy in new[] { ListeningBranchPolicy.First, ListeningBranchPolicy.Second, ListeningBranchPolicy.Manual })
+    {
+        var core = new CoreSession(pack, "syn", policy);
+        int stops = 0, guard = 0;
+        while (core.Current is { } item && guard++ < 1000)
+        {
+            Check(item.Kind != ListeningItemKind.Choice, policy + " 停在菜单等待选择");
+            if (item.IsBlocking) { stops++; if (core.ResolveStop(1) is { } stop && core.ApplyStop(stop)) continue; break; }
+            core.MoveNext();
+        }
+        var lines = core.Items.Where(i => i.Kind == ListeningItemKind.Line).Select(i => i.NodeId[(Sec.Length + 1)..]).ToList();
+        Check(stops == 0 && !core.Items.Any(i => i.IsBlocking), policy + " 有停止：" + string.Join(" | ", core.Items.Where(i => i.IsBlocking).Select(i => i.Notice)));
+        Check(lines.SequenceEqual(expected), policy + " 台词顺序 " + string.Join(",", lines));
+        var point = core.ChoicePoints.Single(c => c.Item.Node?.Id == menu.Id);
+        Check(point.AutoKind == PlaybackLog.Types.Exploration, policy + " 没有记为探索菜单自动读");
+        Check(core.Items.Count(i => i.Kind == ListeningItemKind.Choice) == 0 && core.ChoicePoints.Count(c => c.Item.Node?.Id == menu.Id) == 1, policy + " 菜单出现多次");
+        Console.WriteLine($"   {policy}：{string.Join(" → ", lines)}，0 停，探索记录「{point.AutoLabel}」");
+    }
+});
+Test("安卓听书（0.4.8 设计稿 12）：探索菜单逐项读卡——读回环时列出全部选项（空回环记为已听、正在收听一行、出口最后读），读到出口后卡片收起；不出现主线 / 闲聊字样", () =>
+{
+    var pack = Pack.Load(emptyLoopFile); const string Sec = "syn-sec";
+    var fixture = new Fixture(pack);
+    Android.OS.Handler.Delayed.Clear();
+    var session = fixture.Open(() => 1, "syn");
+    session.Play();
+    Drain(() => session.Current?.Id == Sec + "-n1");
+    Check(session.Current?.Id == Sec + "-n1", "没有读到回环「聊聊」：" + session.Current?.Id);
+    var view = session.Explore;
+    Check(view != null, "读回环时没有探索视图");
+    Check(view!.Rows.Count == 3 && view.LoopCount == 2, "行数 / 回环数不对：" + view.Rows.Count + "/" + view.LoopCount);
+    Check(view.Rows.Count(r => r.Playing) == 1 && view.Rows.Single(r => r.Playing).Label.Contains("聊聊"), "正在收听行不对");
+    Check(view.Rows.Single(r => r.Label.Contains("再等等")).Heard && view.HeardCount == 1, "空回环没有记为已听");
+    Check(view.Rows.Single(r => r.Exit).Label.Contains("离开营地") && !view.Rows.Single(r => r.Exit).Heard, "出口行不对");
+    Check(!view.Rows.Any(r => r.Label.Contains("主线") || r.Label.Contains("闲聊")) && !view.MenuText.Contains("主线") && !view.MenuText.Contains("闲聊"), "出现主线 / 闲聊字样");
+    Drain(() => session.Current?.Id == Sec + "-x1");
+    Check(session.Current?.Id == Sec + "-x1" && session.Explore == null, "读到出口后探索卡没有收起：" + session.Current?.Id);
+    Console.WriteLine($"   回环 {view.LoopCount}，已听 {view.HeardCount}，行：{string.Join(" / ", view.Rows.Select(r => r.Label + (r.Playing ? "▶" : r.Heard ? "✓" : r.Exit ? "（出口）" : "")))}");
+});
+Test("探索菜单（空回环）：游戏伴音按探索顺序跳过空回环（记为已读），读「聊聊」一次后选「离开营地」，不停在空选项、不循环", () =>
+{
+    var pack = Pack.Load(emptyLoopFile); const string Sec = "syn-sec"; string M = Sec + "-menu";
+    var shape = MenuShape.Of(pack, pack.ById[M]);
+    Check(MenuShape.NextExploration(shape, new HashSet<string>(), 1)?.Id == Sec + "-route-n", "未读状态下没有跳过空回环");
+    Check(MenuShape.NextExploration(shape, new HashSet<string> { Sec + "-route-n" }, 2)?.Id == Sec + "-route-x", "回环读完后没有取出口");
+    foreach (int number in new[] { 1, 2 })
+    {
+        var e = new PlaybackEngine(pack); Check(e.OpenGameMenu(M, Sec), "无法定位合成菜单");
+        var chosen = new List<string>(); var played = new List<string>();
+        for (int guard = 0; guard < 200 && e.Mode != RunMode.End; guard++)
+        {
+            if (e.Mode == RunMode.Choice)
+            {
+                Check(e.CurrentId == M, "进入了意外菜单 " + e.CurrentId);
+                Check(DefaultBranchPolicy.TryChoice(e, number, out var o, out var first), $"n={number} 第 {chosen.Count + 1} 次到菜单无法自动选择（会停下）");
+                Check(first != null && first.Kind == "line", "首句不是台词");
+                chosen.Add(o!.Label); ExplorationMemory.Add(e, M, o.Id);
+                foreach (var empty in shape.EmptyLoops) ExplorationMemory.Add(e, M, empty.Id);
+                e.Commit(M); e.SelectBranch(e.AvailableOptions.FindIndex(x => x.Id == o.Id)); continue;
+            }
+            if (e.Mode is RunMode.Following && e.Current is { Kind: "line" } line) played.Add(line.Id[(Sec.Length + 1)..]);
+            if (e.Mode is RunMode.Following or RunMode.Merge) { if (e.Current?.NextId == null && e.Current?.Kind == "line") break; e.Next(true); continue; }
+            break;
+        }
+        Check(chosen.SequenceEqual(new[] { "聊聊", "离开营地" }), $"n={number} 选择序列 " + string.Join(" → ", chosen));
+        Check(ExplorationMemory.Heard(e, M).Contains(Sec + "-route-e"), "空回环没有记为已读");
+        Check(played.Count == played.Distinct().Count(), $"n={number} 台词重复 " + string.Join(",", played));
+        Console.WriteLine($"   游戏伴音 n={number}：选择 {string.Join(" → ", chosen)}；台词 {string.Join(",", played)}");
+    }
+});
+// 0.4.7 空出口：探索菜单的出口本身没有台词（只经 return / merge 到汇合后共同线，如 29-1 menu-026「离开营地」）。
+// 记为已读、记一条「探索菜单出口无台词，从汇合后第一句继续」，从汇合后第一句继续——听书与游戏伴音都不交给手动；空回环保持 7fccb80 行为。
+string emptyExitFile = File.Exists("EmptyExit.pack.json") ? Path.GetFullPath("EmptyExit.pack.json")
+    : "/workspace/build/emptyexit/android/Tests/ListeningDefaultBranch/EmptyExit.pack.json";
+Test("探索菜单（空出口）：合成菜单「再等等……」(空回环) /「聊聊」(回环) /「离开营地」(空出口)——听书默认第一 / 第二 / 手动都 0 停 0 重复，从汇合后第一句继续，记录空出口", () =>
+{
+    var pack = Pack.Load(emptyExitFile); const string Sec = "syn-sec"; var menu = pack.ById[Sec + "-menu"];
+    var shape = MenuShape.Of(pack, menu);
+    Check(shape.Exploration && shape.Loops.Count == 2 && shape.Exits.Count == 1, $"形态 回环/出口 {shape.Loops.Count}/{shape.Exits.Count}");
+    Check(shape.EmptyLoops.Count == 1 && shape.EmptyLoops[0].Id == Sec + "-route-e", "空回环识别错误");
+    Check(shape.EmptyExits.Count == 1 && shape.EmptyExits[0].Id == Sec + "-route-x", "空出口识别错误");
+    Check(MenuShape.EmptyExitLanding(pack, menu, shape.EmptyExits[0])?.Id == Sec + "-l9", "空出口落点不是汇合后第一句");
+    Check(MenuShape.EmptyExitLanding(pack, menu, shape.EmptyLoops[0]) == null, "空回环被当成空出口");
+    Check(!MenuShape.Of(pack, pack.ById[Sec + "-m0"]).Exploration && MenuShape.Of(pack, pack.ById[Sec + "-m0"]).EmptyExits.Count == 0, "外层单选项菜单被当成探索菜单");
+    string[] expected = { "s0", "l0", "n1", "n2", "l9", "s9" };
+    foreach (var policy in new[] { ListeningBranchPolicy.First, ListeningBranchPolicy.Second, ListeningBranchPolicy.Manual })
+    {
+        var core = new CoreSession(pack, "syn", policy);
+        int stops = 0, guard = 0;
+        while (core.Current is { } item && guard++ < 1000)
+        {
+            Check(item.Kind != ListeningItemKind.Choice, policy + " 停在菜单等待选择：" + item.Id);
+            if (item.IsBlocking) { stops++; if (core.ResolveStop(1) is { } stop && core.ApplyStop(stop)) continue; break; }
+            core.MoveNext();
+        }
+        var lines = core.Items.Where(i => i.Kind == ListeningItemKind.Line).Select(i => i.NodeId[(Sec.Length + 1)..]).ToList();
+        Check(stops == 0 && !core.Items.Any(i => i.IsBlocking), policy + " 有停止：" + string.Join(" | ", core.Items.Where(i => i.IsBlocking).Select(i => i.Notice)));
+        Check(lines.SequenceEqual(expected), policy + " 台词顺序 " + string.Join(",", lines));
+        Check(lines.Count == lines.Distinct().Count(), policy + " 有重复");
+        var point = core.ChoicePoints.Single(c => c.Item.Node?.Id == menu.Id);
+        Check(point.AutoKind == PlaybackLog.Types.Exploration && point.SelectedOptionId == Sec + "-route-x", policy + " 没有记为探索菜单自动读并取空出口");
+        Check(point.EmptyExitLabel == "离开营地", policy + " 没有记录空出口");
+        Console.WriteLine($"   {policy}：{string.Join(" → ", lines)}，0 停，探索记录「{point.AutoLabel}」，空出口「{point.EmptyExitLabel}」");
+    }
+    // 安卓听书真实会话：读完整节，播放记录有空出口一条，且不在菜单停下。
+    Android.OS.Handler.Delayed.Clear();
+    var fixture = new Fixture(pack); var session = fixture.Open(() => 1, "syn");
+    session.SetPolicy(ListeningBranchPolicy.First); session.JumpToSection(Sec); session.Play();
+    Drain(() => session.CurrentItem == null || session.Choices.Count > 0, 60000);
+    Check(session.Choices.Count == 0, "安卓听书在菜单停下：" + session.Status);
+    var rows = PlaybackLog.Recent.Where(r => r.Contains("synthetic-empty-exit") && r.Contains(ListeningText.EmptyExitContinue)).ToList();
+    Check(rows.Count == 1 && rows[0].Contains("离开营地"), "播放记录空出口条数 " + rows.Count);
+    session.Stop();
+    Console.WriteLine("   安卓听书播放记录：" + rows[0][(rows[0].IndexOf(',') + 1)..]);
+});
+Test("探索菜单（空出口）：游戏伴音从小节开头自动播放——单选项进入、跳过空回环、读「聊聊」一次后选入空出口「离开营地」并直接落到汇合后第一句；0 交手动 0 重复", () =>
+{
+    var pack = Pack.Load(emptyExitFile); const string Sec = "syn-sec"; string M = Sec + "-menu";
+    var shape = MenuShape.Of(pack, pack.ById[M]);
+    Check(MenuShape.NextExploration(shape, new HashSet<string>(), 1)?.Id == Sec + "-route-n", "未读状态下没有跳过空回环");
+    Check(MenuShape.NextExploration(shape, new HashSet<string> { Sec + "-route-n" }, 2)?.Id == Sec + "-route-x", "回环读完后没有取空出口");
+    foreach (int number in new[] { 1, 2 })
+    {
+        var e = new PlaybackEngine(pack); Check(e.ConfirmGameLine(Sec + "-s0"), "无法定位小节开头");
+        var chosen = new List<string>(); var played = new List<string>(); int handovers = 0;
+        for (int guard = 0; guard < 200 && e.Mode != RunMode.End; guard++)
+        {
+            if (e.Mode == RunMode.Choice)
+            {
+                var menuId = e.CurrentId!; e.Commit(menuId);
+                if (!DefaultBranchPolicy.TryChoice(e, number, out var o, out var first)) { handovers++; break; }
+                Check(first != null && first.Kind == "line", "首句不是台词");
+                var menuShape = MenuShape.Of(pack, pack.ById[menuId]);
+                chosen.Add(o!.Label); ExplorationMemory.Add(e, menuId, o.Id);
+                if (menuShape.Exploration) foreach (var empty in menuShape.EmptyLoops) ExplorationMemory.Add(e, menuId, empty.Id);
+                if (menuShape.IsEmptyExit(o)) Check(first!.Id == Sec + "-l9", "空出口首句不是汇合后第一句：" + first.Id);
+                Check(DefaultBranchPolicy.Enter(e, o, first!), $"n={number} 选入「{o.Label}」后没有停在首句 {first!.Id}（当前 {e.CurrentId} {e.Mode}）");
+                continue;
+            }
+            if (e.Mode == RunMode.Following && e.Current is { Kind: "line" } line) played.Add(line.Id[(Sec.Length + 1)..]);
+            if (e.Mode is RunMode.Following or RunMode.Merge) { if (e.Current?.NextId == null && e.Current?.Kind == "line") break; e.Next(true); continue; }
+            Check(false, $"n={number} 游戏伴音停在 {e.Mode} {e.CurrentId}：{e.Notice}");
+        }
+        Check(handovers == 0, $"n={number} 交给手动（菜单 {e.CurrentId}）");
+        Check(chosen.SequenceEqual(new[] { "进入营地", "聊聊", "离开营地" }), $"n={number} 选择序列 " + string.Join(" → ", chosen));
+        Check(played.SequenceEqual(new[] { "s0", "l0", "n1", "n2", "l9", "s9" }), $"n={number} 台词 " + string.Join(",", played));
+        var heard = ExplorationMemory.Heard(e, M);
+        Check(heard.Contains(Sec + "-route-e") && heard.Contains(Sec + "-route-n") && heard.Contains(Sec + "-route-x"), "空回环 / 回环 / 空出口没有都记为已读");
+        Console.WriteLine($"   游戏伴音 n={number}：选择 {string.Join(" → ", chosen)}；台词 {string.Join(",", played)}；0 交手动 0 重复");
+    }
+});
+// 现行 ch29（6d0e13cd，只读副本）：29-1 听书默认第一 337 句 / 第二 327 句，0 停 0 重复；menu-020、menu-026 的空出口在游戏伴音中自动选入并落到汇合后第一句。
+string liveCh29 = Environment.GetEnvironmentVariable("LIVE_CH29") ?? "/workspace/fixture047/ch29/pack-6d0e13cd.json";
+if (File.Exists(liveCh29))
+    // menu-020（12点 / 3点 / 6点方向）是关卡行为树按钮菜单（行为 752013 节点 158205，各按钮有自己的已选标记 4006 / 4007），游戏不做同回应隐藏：不是问答菜单，3点 / 6点各读一次。
+    Test("空出口（现行 ch29 6d0e13cd）：29-1 听书第一 337 / 第二 327 句 0 停 0 重复，menu-020 不做同回应隐藏（关卡按钮菜单），menu-026「离开营地」记空出口；游戏伴音在 menu-020 / menu-026 自动选入空出口、落到汇合后第一句", () =>
+    {
+        var pack = Pack.Load(liveCh29); const string Sec = "ch29-1dc1158611c810722709";
+        foreach (var (policy, want) in new[] { (ListeningBranchPolicy.First, 337), (ListeningBranchPolicy.Second, 327) })
+        {
+            var core = new CoreSession(pack, ChapterFor(pack, Sec), policy); int stops = 0, guard = 0;
+            while (core.Current is { } item && guard++ < 50000)
+            {
+                if (item.IsBlocking) { if (item.SectionId == Sec) stops++; if (core.ResolveStop(1) is { } st && core.ApplyStop(st)) continue; break; }
+                core.MoveNext();
+            }
+            var lines = core.Items.Where(i => i.SectionId == Sec && i.Kind == ListeningItemKind.Line).Select(i => i.NodeId).ToList();
+            Check(lines.Count == want && lines.Distinct().Count() == want && stops == 0, $"{policy} 29-1 {lines.Count} 句（去重 {lines.Distinct().Count()}），停 {stops}，预期 {want}");
+            var empties = core.ChoicePoints.Where(c => c.SectionId == Sec && c.EmptyExitLabel != null).Select(c => c.Item.Node!.Id[(Sec.Length + 1)..] + "「" + c.EmptyExitLabel + "」").ToList();
+            Check(empties.Any(x => x.StartsWith("menu-026")), policy + " menu-026 没有记空出口：" + string.Join(",", empties));
+            Console.WriteLine($"   {policy}：29-1 {lines.Count} 句，0 停 0 重复；空出口 {string.Join("、", empties)}");
+        }
+        foreach (var tail in new[] { "menu-020", "menu-026" })
+        {
+            var menu = pack.ById[Sec + "-" + tail]; var shape = MenuShape.Of(pack, menu);
+            var exit = shape.EmptyExits.Single();
+            var landing = MenuShape.EmptyExitLanding(pack, menu, exit)!;
+            // 游戏伴音：按真实顺序从小节开头走到该菜单（非自动菜单按默认 / 探索顺序代为选择，模拟玩家），回环读完后应自动取空出口。
+            var e = new PlaybackEngine(pack); Check(e.ConfirmGameLine(pack.Chapters.SelectMany(c => c.Sections).First(s => s.Id == Sec).StartId) || e.OpenGameMenu(pack.Chapters.SelectMany(c => c.Sections).First(s => s.Id == Sec).StartId, Sec), "无法定位 29-1 开头");
+            bool reached = false;
+            for (int guard = 0; guard < 5000 && e.Mode != RunMode.End && !reached; guard++)
+            {
+                if (e.Mode == RunMode.Choice)
+                {
+                    var cur = e.Current!; e.Commit(cur.Id); var sh = MenuShape.Of(pack, cur);
+                    bool auto = DefaultBranchPolicy.TryChoice(e, 1, out var o, out var first);
+                    if (cur.Id == menu.Id && auto && o!.Id == exit.Id)
+                    {
+                        Check(first!.Id == landing.Id, tail + " 空出口首句不是汇合后第一句");
+                        Check(DefaultBranchPolicy.Enter(e, o, first), tail + " 选入空出口后没有停在汇合后第一句：" + e.CurrentId + " " + e.Mode);
+                        reached = true; break;
+                    }
+                    var pick = auto ? o! : sh.Exploration ? MenuShape.NextExploration(sh, ExplorationMemory.Heard(e, cur.Id), 1)! : cur.Options[0];
+                    ExplorationMemory.Add(e, cur.Id, pick.Id); if (sh.Exploration) foreach (var em in sh.EmptyLoops) ExplorationMemory.Add(e, cur.Id, em.Id);
+                    Check(cur.Id != menu.Id || sh.Loops.Any(l => l.Id == pick.Id), tail + " 自动选择失败（会交给手动）：取了 " + pick.Label);
+                    if (auto) Check(DefaultBranchPolicy.Enter(e, pick, first!), "选入失败 " + cur.Id);
+                    else { e.SelectBranch(e.AvailableOptions.FindIndex(x => x.Id == pick.Id)); for (int k = 0; k < 8 && e.Mode == RunMode.Merge; k++) e.Next(true); }
+                    continue;
+                }
+                if (e.Mode is RunMode.Following or RunMode.Merge) { if (DeclaredContinuationPolicy.TryResolve(e, out var c) && c != null && DeclaredContinuationPolicy.Follow(e, c)) continue; e.Next(true); continue; }
+                break;
+            }
+            Check(reached, tail + " 游戏伴音没有自动选入空出口（停在 " + e.CurrentId + " " + e.Mode + "）");
+            Console.WriteLine($"   游戏伴音 {tail}：自动选入「{exit.Label}」→ {landing.Speaker}：{landing.Text}");
+        }
+    });
+if (File.Exists(Path.Combine(curPacks, "029.json")))
+    Test("探索菜单（D）：30-8「（还是等会吧）」只读一次后取「继续前进」", () =>
+    {
+        var pack = Pack.Load(Path.Combine(curPacks, "029.json")); var menu = pack.ById["ch30-ceed979fd98e932b93e5-menu-002"];
+        var shape = MenuShape.Of(pack, menu); Check(shape.Exploration && shape.Loops.Count == 1 && shape.Exits.Count == 1, "30-8 形态识别错误");
+        foreach (var policy in new[] { ListeningBranchPolicy.First, ListeningBranchPolicy.Second, ListeningBranchPolicy.Manual })
+        {
+            var core = new CoreSession(pack, ChapterFor(pack, menu.SectionId), policy);
+            Check(core.SeekSection(menu.SectionId), "无法定位 30-8");
+            for (int guard = 0; guard < 20000 && core.Current is { } item && item.SectionId == menu.SectionId; guard++)
+            {
+                if (item.Kind == ListeningItemKind.Choice) { Check(item.ChoiceKey?.EndsWith(menu.Id) != true, policy + " 在 30-8 菜单停下"); core.Choose(item.Options![0].Id); continue; }
+                if (item.IsBlocking) { if (core.ResolveStop(1) is { } stop && core.ApplyStop(stop)) continue; break; }
+                core.MoveNext();
+            }
+            var lines = core.Items.Where(i => i.SectionId == menu.SectionId).Select(i => i.NodeId).ToList();
+            Check(lines.Count(x => x == shape.Loops[0].TargetId) == 1, policy + "（还是等会吧）没有恰好读一次");
+            Check(!core.Items.Any(i => i.SectionId == menu.SectionId && i.Kind == ListeningItemKind.Choice && i.ChoiceKey?.EndsWith(menu.Id) == true), policy + " 在 30-8 菜单停下");
+        }
+    });
+if (File.Exists(Path.Combine(curPacks, "032.json")))
+{
+    Test("结局分歧（E）：ch33 只有 4 个「开启结局」菜单；默认第一 / 第二各自只读所选结局到底，不接到另一结局，并提示所选结局已听完", () =>
+    {
+        var pack = Pack.Load(Path.Combine(curPacks, "032.json"));
+        var endings = pack.Nodes.Where(n => n.Kind == "choice" && !n.Archived && MenuShape.Of(pack, n).Ending).Select(n => n.Id).ToList();
+        Check(endings.Count == 4, "ch33 结局菜单数 " + endings.Count + "：" + string.Join(",", endings));
+        foreach (var policy in new[] { ListeningBranchPolicy.First, ListeningBranchPolicy.Second })
+        {
+            var core = new CoreSession(pack, "ch33", policy);
+            int finished = core.Items.Count(i => i.Kind == ListeningItemKind.Notice && i.Notice == ListeningText.EndingFinished);
+            Check(finished <= 1, policy + " 接了多个结局");
+            if (finished == 1) Check(core.Items[^1].Notice == ListeningText.EndingFinished, policy + " 结局听完后还有内容");
+            var taken = core.ChoicePoints.Where(c => endings.Contains(c.Item.Node?.Id ?? "")).ToList();
+            Console.WriteLine($"   {policy}：经过结局菜单 {taken.Count} 个，所选结局听完提示 {finished}，最后小节 {core.Items[^1].SectionTitle}");
+        }
+    });
+    Test("结局分歧（E/G）：安卓听书手动选择停在 33-8 结局菜单，15 秒倒计时按第一 / 第二个选项自动选择并显示「已自动选择」，只读该结局；开关关闭则一直等待", () =>
+    {
+        var pack = Pack.Load(Path.Combine(curPacks, "032.json"));
+        var menu = pack.ById["ch33-3394c256db2e0799f4f3-menu-003"];
+        foreach (int number in new[] { 1, 2 })
+        {
+            var core = new CoreSession(pack, "ch33", ListeningBranchPolicy.Manual);
+            Check(core.SeekNode(menu.Id) || core.SeekSection(menu.SectionId), "无法定位 33-8");
+            Android.OS.Handler.Delayed.Clear();
+            var fixture = new Fixture(pack); var session = fixture.Open(() => number, "ch33", () => true);
+            session.SetPolicy(ListeningBranchPolicy.Manual); session.JumpToSection(menu.SectionId); session.Play();
+            Drain(() => session.Choices.Count > 0 && session.CurrentItem?.ChoiceKey?.Contains(menu.Id) == true || session.Choices.Count > 0 && session.Status.Contains("秒后自动选择") && session.CurrentItem?.SectionId != menu.SectionId);
+            Check(session.Choices.Count > 0 && session.Status.Contains("15 秒后自动选择"), "没有在结局菜单开始倒计时：" + session.Status);
+            var expected = menu.Options[number - 1].Label;
+            for (int t = 0; t < 15 && session.Choices.Count > 0; t++) { var d = Android.OS.Handler.Delayed.Last(x => x.Delay == 1000); Android.OS.Handler.Delayed.Remove(d); d.Action(); }
+            Check(session.Choices.Count == 0, "倒计时结束没有选择");
+            Check(PlaybackLog.Recent.Any(r => r.Contains(",自动选择,") && r.Contains(expected)), "播放记录没有自动选择：" + expected);
+            Drain(() => session.CurrentItem == null, 60000);
+            if (number == 1) Check(session.Status.Contains("本章已听完") && session.CurrentItem == null, "第一个结局听完后没有结束：" + session.Status);
+            session.Stop();
+            Console.WriteLine($"   默认{number}：选择「{expected[..Math.Min(10, expected.Length)]}」后停在：{session.CurrentItem?.SectionTitle ?? "章末"} {session.Status[..Math.Min(40, session.Status.Length)]}");
+        }
+        {
+            Android.OS.Handler.Delayed.Clear();
+            var fixture = new Fixture(pack); var session = fixture.Open(() => 1, "ch33", () => false);
+            session.SetPolicy(ListeningBranchPolicy.Manual); session.JumpToSection(menu.SectionId); session.Play();
+            Drain(() => session.Choices.Count > 0);
+            Check(session.Choices.Count > 0 && !session.Status.Contains("秒后"), "开关关闭仍然倒计时：" + session.Status);
+            Drain(() => false, 100);
+            Check(session.Choices.Count > 0 && session.Status.Contains("分支自动选择已关闭"), "开关关闭后没有一直等待：" + session.Status);
+            session.Stop();
+        }
+    });
+    Test("结局分歧（E）：选过一个结局后回到结局菜单前（目录 / 定位），可重新选择另一个结局", () =>
+    {
+        var pack = Pack.Load(Path.Combine(curPacks, "032.json"));
+        var menuId = "ch33-3394c256db2e0799f4f3-menu-003";
+        var core = new CoreSession(pack, "ch33", ListeningBranchPolicy.Manual);
+        Check(core.SeekSection(pack.ById[menuId].SectionId), "无法定位 33-8");
+        int guard = 0;
+        while (core.Current is { } item && guard++ < 5000 && !(item.Kind == ListeningItemKind.Choice && item.ChoiceKey!.Contains(menuId)))
+        { if (item.Kind == ListeningItemKind.Choice) core.Choose(item.Options![0].Id); else if (item.IsBlocking) break; else core.MoveNext(); }
+        var choice = core.Current; Check(choice?.Kind == ListeningItemKind.Choice, "没到结局菜单");
+        string choiceId = choice!.Id;
+        Check(core.Choose(choice.Options![0].Id), "无法选第一个结局");
+        Check(core.Items.Any(i => i.Notice == ListeningText.EndingFinished), "第一个结局没有结局听完提示");
+        Check(core.SeekSection(pack.ById[menuId].SectionId), "无法回到 33-8");
+        guard = 0;
+        while (core.Current is { } item && guard++ < 5000 && item.Kind != ListeningItemKind.Choice) core.MoveNext();
+        Check(core.Current?.Kind == ListeningItemKind.Choice && core.Current.ChoiceKey!.Contains(menuId), "回到 33-8 后结局菜单没有重新提供选择：" + core.Current?.Id);
+        Check(core.Choose(core.Current!.Options![1].Id), "无法改选另一个结局");
+    });
+}
+Test("停下处（I/L）：当前库默认第一个选项计划中的每处停下，都能按顺序续接或跳到下一小节 / 结束本章；统计两类数量", () =>
+{
+    if (!Directory.Exists(curPacks)) return;
+    int order = 0, dead = 0, chapterEnd = 0, choices = 0, sectionDone = 0; var kinds = new Dictionary<string, int>();
+    foreach (var file in Directory.GetFiles(curPacks, "*.json").OrderBy(x => x))
+    {
+        Pack pack; try { pack = Pack.Load(file); } catch { continue; }
+        foreach (var chapter in pack.Chapters)
+        {
+            var core = new CoreSession(pack, chapter.Id, ListeningBranchPolicy.First);
+            for (int guard = 0; guard < 50000 && core.Current is { } item; guard++)
+            {
+                if (!item.IsBlocking && item.Kind != ListeningItemKind.Choice) { core.MoveNext(); continue; }
+                var stop = core.ResolveStop(1); Check(stop != null, "停下处无法处理：" + item.Id);
+                string k = stop!.Action + "/" + item.WaitingKind; kinds[k] = kinds.GetValueOrDefault(k) + 1;
+                if (stop!.SectionComplete) sectionDone++; else switch (stop!.Action) { case ListeningStopAction.OrderContinue: order++; break; case ListeningStopAction.NextSection: dead++; break; case ListeningStopAction.ChapterEnd: chapterEnd++; break; default: choices++; break; }
+                string before = item.Id; string section = item.SectionId;
+                Check(core.ApplyStop(stop), "停下处处理失败：" + stop.Action + " " + item.Id);
+                if (stop.Action == ListeningStopAction.NextSection) Check(core.Current?.SectionId != section, "没有跳到下一小节");
+                if (stop.Action == ListeningStopAction.ChapterEnd) Check(core.Completed, "最后一个小节没有结束本章");
+            }
+        }
+    }
+    Console.WriteLine($"   当前库（默认第一）：按顺序续接 {order}，小节已读完进入下一小节 {sectionDone}，无文本跳下一小节 {dead}，无文本·本章结束 {chapterEnd}，待选 {choices}；" + string.Join("，", kinds.OrderByDescending(x => x.Value).Select(x => x.Key + "=" + x.Value)));
+    Check(order + dead + chapterEnd > 0, "没有找到任何停下处");
+});
+Test("播放记录（K）：CSV 带 BOM 与中文表头，逐条写入、可导出、超限滚动只保留最近 5000 条", () =>
+{
+    string file = Path.Combine(Path.GetTempPath(), "pl-" + Guid.NewGuid().ToString("N") + ".csv");
+    PlaybackLog.Configure(file);
+    var pack = Load();
+    PlaybackLog.Write(PlaybackLog.Types.AutoSelect, "听书", pack, "第38章", "38-1", "n1", "默认分支第一个选项", "选项, 带逗号");
+    PlaybackLog.Write(PlaybackLog.Types.PlayerFeedback, "听书", pack, "第38章", "38-1", "n2", "后续没有配音文本");
+    var text = PlaybackLog.Export();
+    Check(text.StartsWith("\uFEFF时间,类型,模式,配音包,配音包编号,章节,小节,节点,原因,所选选项"), "表头或 BOM 错误");
+    Check(text.Contains(",自动选择,听书,") && text.Contains("\"选项, 带逗号\"") && text.Contains(",玩家反馈,"), "记录内容错误");
+    for (int i = 0; i < PlaybackLog.MaxEntries + 1001; i++) PlaybackLog.Write(PlaybackLog.Types.Stop, "听书", pack, "c", "s", "n" + i, "r");
+    int count = File.ReadLines(file).Count() - 1;
+    Check(count <= PlaybackLog.MaxEntries + 1000 && count >= PlaybackLog.MaxEntries, "滚动后条数 " + count);
+    Check(File.ReadAllBytes(file).Take(3).SequenceEqual(new byte[] { 0xEF, 0xBB, 0xBF }), "滚动后丢失 BOM");
+    PlaybackLog.Configure(Path.Combine(Path.GetTempPath(), "pl-scratch.csv"));
+});
+
+// ---- 0.4.7 游戏伴音终点规则：未归档 end 节点（选项出口 / 小节正文末尾）不关闭自动播放，提示终点文字，等待游戏画面定位，定位到下一句自动续播 ----
+// 与 AppSession.AdvanceAfterAutoLine / TryBeginGameEndWait / HandleGameEndWaitObservation 相同的判定顺序：
+// 本句播完（Tapping）→ 续播被拒 → GameEndWaitPolicy.TryBegin → AutoPlaybackCycle.BeginWaiting（仍 Running、无超时）
+// → 读到的画面用 Matcher.FindAll 在终点小节与下一小节里找唯一台词 → CanResume（导航器确认）→ Start/PreparePlayback 续播。
+List<OcrBlock> Screen(Node node) => new() { new OcrBlock { Text = node.Text, Score = .99, Box = new[] { new double[] { 0, 0 }, new double[] { 400, 0 }, new double[] { 400, 40 }, new double[] { 0, 40 } } } };
+(GameEndWait Wait, AutoPlaybackCycle Cycle) EndWaitAt(PlaybackEngine e, string label)
+{
+    var cycle = new AutoPlaybackCycle(); long now = 1000;
+    cycle.Start(e.CurrentId!, now);
+    Check(cycle.PreparePlayback(cycle.Epoch, e.CurrentId!, now) && cycle.BindAudio(cycle.Epoch, e.CurrentId!, 7, now) && cycle.CompleteAudio(cycle.Epoch, 7, now + 3000), label + "：末句没有播完");
+    var decision = e.EvaluateCommonAutoPlayNext();
+    Check(!(decision.Allowed && decision.Next != null), label + "：终点前竟允许点击下一句 " + decision.Next?.Id);
+    Check(!decision.Reason.Contains("共同剧情已结束") && !decision.Reason.Contains("本段已播放完毕"), label + "：仍显示旧的结束提示：" + decision.Reason);
+    Check(GameEndWaitPolicy.TryBegin(e, decision, out var wait) && wait != null, label + "：没有进入终点等待（" + decision.Code + "）");
+    Check(cycle.BeginWaiting(cycle.Epoch, wait!.SourceId), label + "：自动播放没有转入等待");
+    Check(cycle.Running && cycle.WaitingForGame && !cycle.TimedOut(now + 3_600_000), label + "：等待中自动播放被关闭或超时");
+    Check(!cycle.BeginTap(cycle.Epoch, "x", now + 4000), label + "：等待中仍会点击游戏");
+    PlaybackLog.Write(PlaybackLog.Types.EndWait, "自动播放", e.Pack, "", wait.SectionId, wait.EndId ?? wait.SourceId, GameEndWaitPolicy.LogReason(wait));
+    return (wait, cycle);
+}
+Node? Located(PlaybackEngine e, GameEndWait wait, Node screen)
+{
+    var blocks = Screen(screen);
+    var exact = wait.SearchSections.SelectMany(sec => Matcher.FindAll(e, sec, blocks))
+        .Where(c => c.Node.Kind == "line" && c.Node.Id != wait.SourceId && Matcher.Normalize(c.Evidence) == Matcher.Normalize(c.Node.Text))
+        .GroupBy(c => c.Node.Id).Select(g => g.First().Node).ToList();
+    return GameEndWaitPolicy.Pick(e.Pack, wait, exact);
+}
+void ResumeAt(PlaybackEngine e, GameEndWait wait, AutoPlaybackCycle cycle, Node next, string label)
+{
+    var source = e.Pack.ById[wait.SourceId];
+    Check(Located(e, wait, source) == null, label + "：画面仍是末句时被当成新位置");
+    Check(!GameEndWaitPolicy.CanResume(e, wait, source, out _, out _), label + "：末句本身结束了等待");
+    Check(cycle.WaitingForGame, label + "：末句画面让等待结束");
+    var found = Located(e, wait, next);
+    Check(found?.Id == next.Id, label + "：画面出现下一句却没有唯一定位到 " + next.Id + "（" + found?.Id + "）");
+    Check(GameEndWaitPolicy.CanResume(e, wait, found!, out var probe, out var why) && probe != null, label + "：定位到下一句仍不能续播：" + why);
+    cycle.Start(found!.Id, 9000);
+    Check(cycle.PreparePlayback(cycle.Epoch, found.Id, 9000) && cycle.Phase == AutoPlaybackPhase.Playing, label + "：没有从定位句恢复播放");
+    Check(e.ConfirmGameLine(found.Id) && e.CurrentId == found.Id && e.Mode == RunMode.Following, label + "：导航器没有确认定位句");
+}
+Node FirstLine(Pack pack, string sectionId)
+{
+    var start = pack.Chapters.SelectMany(c => c.Sections).First(x => x.Id == sectionId).StartId;
+    var node = pack.ById[start];
+    for (int i = 0; i < 50 && node.Kind != "line" && node.NextId != null; i++) node = pack.ById[node.NextId];
+    return node;
+}
+
+// 合成包：选项出口（n2 → 无文字 end）与小节正文末尾（s9 → 「原表终点」），以及下一小节首句。
+string gameEndFile = Path.Combine(Path.GetTempPath(), "game-end-wait.pack.json");
+{
+    var root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(emptyExitFile))!.AsObject();
+    root["id"] = "synthetic-game-end"; root["title"] = "终点等待合成包";
+    var nodes = root["nodes"]!.AsArray();
+    System.Text.Json.Nodes.JsonObject N(string id) => nodes.Select(n => n!.AsObject()).First(n => (string?)n["id"] == id);
+    N("syn-sec-n2")["nextId"] = "syn-sec-n-end";
+    N("syn-sec-s9")["nextId"] = "syn-sec-end";
+    nodes.Add(new System.Text.Json.Nodes.JsonObject { ["id"] = "syn-sec-n-end", ["sectionId"] = "syn-sec", ["kind"] = "end", ["pathId"] = "syn-sec-route-n", ["text"] = "" });
+    nodes.Add(new System.Text.Json.Nodes.JsonObject { ["id"] = "syn-sec-end", ["sectionId"] = "syn-sec", ["kind"] = "end", ["pathId"] = "", ["text"] = "原表终点" });
+    nodes.Add(new System.Text.Json.Nodes.JsonObject { ["id"] = "syn-sec2-a", ["sectionId"] = "syn-sec2", ["kind"] = "line", ["pathId"] = "", ["speaker"] = "露西亚", ["text"] = "第二小节的第一句台词。" });
+    root["chapters"]![0]!["sections"]!.AsArray().Add(new System.Text.Json.Nodes.JsonObject { ["id"] = "syn-sec2", ["title"] = "合成 第二小节", ["startId"] = "syn-sec2-a" });
+    File.WriteAllText(gameEndFile, root.ToJsonString());
+}
+Test("终点规则（合成包）：小节正文末尾 end「原表终点」——自动播放保持开启进入等待，提示终点文字，写一条记录；画面仍是末句时不动，定位到下一小节首句后自动续播", () =>
+{
+    var pack = Pack.Load(gameEndFile);
+    var e = new PlaybackEngine(pack);
+    Check(e.ConfirmGameLine("syn-sec-s9"), "无法定位末句 s9");
+    int before = PlaybackLog.Recent.Count(r => r.Contains(PlaybackLog.Types.EndWait));
+    var (wait, cycle) = EndWaitAt(e, "小节末尾");
+    Check(wait.EndId == "syn-sec-end" && wait.Hint == "原表终点", "提示不是终点自己的文字：" + wait.Hint);
+    Check(wait.NextSectionId == "syn-sec2" && wait.SearchSections.SequenceEqual(new[] { "syn-sec", "syn-sec2" }), "没有把下一小节纳入定位");
+    Check(PlaybackLog.Recent.Count(r => r.Contains(PlaybackLog.Types.EndWait) && r.Contains("原表终点")) == before + 1, "没有写一条含终点文字的记录");
+    ResumeAt(e, wait, cycle, pack.ById["syn-sec2-a"], "小节末尾");
+    Console.WriteLine($"   s9 →「{wait.Hint}」等待 → 定位 syn-sec2-a 续播（{cycle.Phase}）");
+});
+Test("终点规则（合成包）：选项出口 end（无文字）——提示兜底「请按游戏画面定位后续」，自动播放不关闭，定位到出口后的下一句自动续播", () =>
+{
+    var pack = Pack.Load(gameEndFile);
+    var e = new PlaybackEngine(pack);
+    Check(e.ConfirmGameLine("syn-sec-n2"), "无法定位选项末句 n2");
+    var (wait, cycle) = EndWaitAt(e, "选项出口");
+    Check(wait.EndId == "syn-sec-n-end" && wait.Hint == GameEndWaitPolicy.FallbackHint, "无文字终点没有用兜底提示：" + wait.Hint);
+    ResumeAt(e, wait, cycle, pack.ById["syn-sec-l9"], "选项出口");
+    Console.WriteLine($"   n2 →「{wait.Hint}」等待 → 定位 l9 续播");
+});
+Test("终点规则（现行 ch38）：38-1 正文末尾 v2-end「小节结束」——自动播放保持开启进入等待，定位到 38-2 首句后自动续播", () =>
+{
+    var pack = Pack.Load(packFile);
+    var end = pack.ById[Section + "-v2-end"];
+    var last = pack.Nodes.Single(n => n.NextId == end.Id);
+    var e = new PlaybackEngine(pack);
+    Check(e.ConfirmGameLine(last.Id), "无法定位 38-1 末句");
+    var (wait, cycle) = EndWaitAt(e, "38-1 末尾");
+    Check(wait.EndId == end.Id && wait.Hint == "小节结束", "提示不是终点文字：" + wait.Hint);
+    Check(wait.NextSectionId != null, "38-1 没有下一小节");
+    var next = FirstLine(pack, wait.NextSectionId!);
+    Check(GameEndWaitPolicy.ExpectedNext(pack, wait)?.Id == next.Id, "下一小节首句判断不一致");
+    Check(pack.Nodes.Count(n => n.Kind == "line" && n.Text == next.Text) > 1, "夹具变化：38-2 首句不再与节内另一句同文（本用例覆盖同文消歧）");
+    ResumeAt(e, wait, cycle, next, "38-1 末尾");
+    Console.WriteLine($"   38-1 末句 →「{wait.Hint}」等待 → 定位下一小节首句「{next.Text}」续播");
+});
+if (File.Exists("/workspace/fixture047/probe/062.json"))
+    Test("终点规则（EX02 062）：选项出口经待续接 gap 到 SIXSUP_E-M04_END「请按游戏画面定位后续」——等待并在同节下一句定位后续播", () =>
+    {
+        var pack = Pack.Load("/workspace/fixture047/probe/062.json");
+        var e = new PlaybackEngine(pack);
+        Check(e.ConfirmGameLine("SIXSUP_15021401"), "无法定位 SIXSUP_15021401");
+        var (wait, cycle) = EndWaitAt(e, "EX02 选项出口");
+        Check(wait.EndId == "SIXSUP_E-M04_END" && wait.Hint == "请按游戏画面定位后续", "提示错误：" + wait.Hint + " " + wait.EndId);
+        ResumeAt(e, wait, cycle, pack.ById["SIXSUP_15021402"], "EX02 选项出口");
+    });
+Test("终点规则：听书模式不变（合成包 s9 之后仍按小节读完处理，不出现终点等待）", () =>
+{
+    var pack = Pack.Load(gameEndFile);
+    var core = new CoreSession(pack, "syn", ListeningBranchPolicy.First);
+    Check(core.Items.Any(i => i.NodeId == "syn-sec2-a"), "听书没有读到第二小节");
+    Check(core.Items.All(i => !i.Notice.Contains(GameEndWaitPolicy.FallbackHint) && !i.Notice.Contains("等待游戏画面定位")), "听书出现了游戏终点等待");
+});
+
+// ---- 0.4.7 同回应隐藏（问答菜单，19-14 何为希望）：回到菜单时与刚选项回应相同的选项隐藏；同一段错误回应只读一次，随后取正确答案 ----
+string quizFile = File.Exists("QuizHide.pack.json") ? Path.GetFullPath("QuizHide.pack.json")
+    : "/workspace/build/rel047/android/Tests/ListeningDefaultBranch/QuizHide.pack.json";
+(List<string> Lines, int Stops) QuizListen(Pack pack, string sec, ListeningBranchPolicy policy, int number)
+{
+    var core = new CoreSession(pack, ChapterFor(pack, sec), policy); int stops = 0, guard = 0;
+    while (core.Current is { } item && guard++ < 50000)
+    {
+        Check(!(item.IsBlocking && item.WaitingKind == ListeningWaitingKind.TraversalLimit), policy + " 过深停下：" + item.Notice);
+        if (item.Kind == ListeningItemKind.Choice || item.IsBlocking)
+        {
+            if (item.IsBlocking && item.SectionId == sec) stops++;
+            if (core.ResolveStop(number) is { } st && core.ApplyStop(st)) continue;
+            if (item.SectionId == sec) stops++; break;
+        }
+        core.MoveNext();
+    }
+    return (core.Items.Where(i => i.SectionId == sec && i.Kind == ListeningItemKind.Line).Select(i => i.NodeId).ToList(), stops);
+}
+// 游戏伴音：从小节开头自动播放；菜单按 DefaultBranchPolicy（单选项 / 同回应隐藏后单选项 / 默认分支 / 探索顺序）自动选入，与 AppSession 相同记入探索记忆。
+(List<string> Played, int Handovers, int HiddenSingles, List<string> Chosen) QuizGame(Pack pack, string sec, int number)
+{
+    var start = pack.Chapters.SelectMany(c => c.Sections).First(x => x.Id == sec).StartId;
+    var e = new PlaybackEngine(pack); Check(e.ConfirmGameLine(start) || e.OpenGameMenu(start, sec), "无法定位小节开头");
+    var played = new List<string>(); var chosen = new List<string>(); int handovers = 0, hiddenSingles = 0;
+    for (int guard = 0; guard < 20000 && e.Mode != RunMode.End && e.Current?.SectionId == sec; guard++)
+    {
+        if (e.Mode == RunMode.Choice)
+        {
+            var menuId = e.CurrentId!; e.Commit(menuId);
+            bool single = DefaultBranchPolicy.IsSingleOptionMenu(e);
+            if (DefaultBranchPolicy.IsSingleAfterHiding(e)) hiddenSingles++;
+            if (!DefaultBranchPolicy.TryChoice(e, single ? 1 : number, out var o, out var first)) { handovers++; break; }
+            chosen.Add(o!.Label); ExplorationMemory.Add(e, menuId, o.Id);
+            var sh = MenuShape.Of(pack, pack.ById[menuId]);
+            if (sh.Exploration) foreach (var em in sh.EmptyLoops) ExplorationMemory.Add(e, menuId, em.Id);
+            Check(DefaultBranchPolicy.Enter(e, o, first!), "选入失败 " + menuId);
+            continue;
+        }
+        if (e.Mode == RunMode.Following && e.Current is { Kind: "line" } line) played.Add(line.Id);
+        if (e.Mode is RunMode.Following or RunMode.Merge)
+        {
+            if (DeclaredContinuationPolicy.TryResolve(e, out var c) && c != null && DeclaredContinuationPolicy.Follow(e, c)) continue;
+            if (e.Current?.NextId == null && e.Current?.Kind == "line") break;
+            e.Next(true); continue;
+        }
+        handovers++; break;
+    }
+    return (played, handovers, hiddenSingles, chosen);
+}
+int Wrong(Pack pack, IEnumerable<string> ids, string text) => ids.Count(id => pack.ById[id].Text == text);
+const string QuizW1 = "（不……李斯特在意的并不是这些，再仔细考虑）";
+const string QuizW2 = "（如果名为希望的东西只是这样的话，和李斯特又有什么区别……一定可以找到别的答案）";
+Test("同回应隐藏（合成问答包）：错误答案同文不同节点识别为问答菜单；短句「……」同文的探索菜单不隐藏；Action 优先", () =>
+{
+    var pack = Pack.Load(quizFile); const string S = "syn-sec";
+    var q1 = MenuShape.Of(pack, pack.ById[S + "-q1"]); var c = MenuShape.Of(pack, pack.ById[S + "-c"]);
+    Check(q1.Quiz && MenuShape.Of(pack, pack.ById[S + "-q2"]).Quiz && !c.Quiz, "问答识别错误");
+    Check(q1.VisibleAfter(S + "-route-q1-w1").Select(o => o.Id).SequenceEqual(new[] { S + "-route-q1-r" }), "q1 答错后应只剩正确答案");
+    Check(c.VisibleAfter(S + "-route-c-a").Count == 3 && c.ResponseMatch.Count == 0, "短句「……」被误判为同回应");
+    Check(MenuShape.NextExploration(q1, new HashSet<string>(), 1)?.Id == S + "-route-q1-w1" && MenuShape.NextExploration(q1, new HashSet<string>(), 2)?.Id == S + "-route-q1-r", "问答菜单首次没有按默认序号选");
+    Check(MenuShape.NextExploration(q1, new HashSet<string> { S + "-route-q1-w1" }, 1)?.Id == S + "-route-q1-r", "答错后没有取正确答案");
+});
+// 适用范围：只对 Movie 选择菜单（有原表 Action 或在 19-14 白名单里）生效；关卡行为树按钮菜单（无 Action、不在白名单，如 29-1 menu-020）同文也不隐藏。
+Pack QuizVariant(string file, Func<string, string> edit, string tag)
+{
+    var tmp = Path.Combine(Path.GetTempPath(), "quizscope-" + tag + "-" + Environment.ProcessId + ".json");
+    File.WriteAllText(tmp, edit(File.ReadAllText(file))); try { return Pack.Load(tmp); } finally { File.Delete(tmp); }
+}
+Test("同回应隐藏适用范围（合成问答包）：去掉原表 Action（= 关卡按钮菜单）后同文错误答案不再分组、不隐藏；正确答案有 Action 时错误答案按同文兜底分组", () =>
+{
+    const string S = "syn-sec";
+    var movie = Pack.Load(quizFile);
+    var q1 = MenuShape.Of(movie, movie.ById[S + "-q1"]);
+    Check(MenuShape.MovieSource(movie, movie.ById[S + "-q1"]) == MenuShape.MatchAction && q1.Quiz && q1.ResponseMatch.Values.Single() == MenuShape.MatchText, "Movie 选择菜单内没有按同文兜底分组");
+    var level = QuizVariant(quizFile, t => t.Replace("冻结来源的此选项直接目标：", "（已去除）"), "level");
+    foreach (var m in new[] { "-q1", "-q2", "-c" })
+    {
+        var menu = level.ById[S + m]; var shape = MenuShape.Of(level, menu);
+        Check(MenuShape.MovieSource(level, menu) == null && !shape.Quiz && shape.ResponseMatch.Count == 0 && shape.Options.All(o => shape.VisibleAfter(o.Id).Count == shape.Options.Count), m + " 关卡按钮菜单仍被分组 / 隐藏");
+    }
+    var r = QuizListen(level, S, ListeningBranchPolicy.First, 1);
+    var ids = r.Lines.Select(x => x[(S.Length + 1)..]).ToList();
+    Check(ids.Contains("q1-a") && ids.Contains("q1-b") && ids.Contains("q2-a") && ids.Contains("q2-b") && r.Stops == 0 && ids.Count == ids.Distinct().Count(), "关卡按钮菜单应各回环读一次：" + string.Join(",", ids));
+    var g = QuizGame(level, S, 1);
+    Check(g.HiddenSingles == 0 && g.Handovers == 0, $"关卡按钮菜单游戏伴音出现隐藏：{g.HiddenSingles}");
+    Console.WriteLine($"   关卡按钮菜单（去掉 Action）：听书 {string.Join(",", ids)}；游戏伴音隐藏 {g.HiddenSingles} 次");
+});
+Test("同回应隐藏（合成问答包）：听书默认第一 / 第二 / 手动（倒计时一 / 二）——每题错误回应至多一次，随后正确答案，0 停 0 重复；安卓听书会话同样不停", () =>
+{
+    var pack = Pack.Load(quizFile); const string S = "syn-sec";
+    var one = new[] { "s0", "q1-a", "q1-r1", "m1", "q2-a", "q2-r1", "x0", "c-a1", "c-b1", "c-x1", "s9" };
+    var two = new[] { "s0", "q1-r1", "m1", "q2-b", "q2-r1", "x0", "c-a1", "c-b1", "c-x1", "s9" };
+    foreach (var (policy, number, want) in new[] { (ListeningBranchPolicy.First, 1, one), (ListeningBranchPolicy.Second, 2, two), (ListeningBranchPolicy.Manual, 1, one), (ListeningBranchPolicy.Manual, 2, two) })
+    {
+        var r = QuizListen(pack, S, policy, number);
+        var ids = r.Lines.Select(x => x[(S.Length + 1)..]).ToList();
+        Check(ids.SequenceEqual(want) && r.Stops == 0, $"{policy}/{number}: {string.Join(",", ids)} 停 {r.Stops}");
+        Console.WriteLine($"   {policy}/默认{number}：{string.Join(",", ids)}");
+    }
+    Android.OS.Handler.Delayed.Clear();
+    var fixture = new Fixture(pack); var session = fixture.Open(() => 1, "syn");
+    session.SetPolicy(ListeningBranchPolicy.First); session.JumpToSection(S); session.Play();
+    Drain(() => session.CurrentItem == null || session.Choices.Count > 0, 60000);
+    Check(session.Choices.Count == 0, "安卓听书在菜单停下：" + session.Status);
+    session.Stop();
+});
+Test("同回应隐藏（合成问答包）：游戏伴音——答错一次后同回应选项隐藏、只剩正确答案，按单选项自动选入不停下；0 交手动 0 重复", () =>
+{
+    var pack = Pack.Load(quizFile); const string S = "syn-sec";
+    foreach (var (number, want, singles) in new[] { (1, new[] { "s0", "q1-a", "q1-r1", "m1", "q2-a", "q2-r1", "x0", "c-a1", "c-b1", "c-x1", "s9" }, 2),
+                                                    (2, new[] { "s0", "q1-r1", "m1", "q2-b", "q2-r1", "x0", "c-a1", "c-b1", "c-x1", "s9" }, 1) })
+    {
+        var g = QuizGame(pack, S, number);
+        var ids = g.Played.Select(x => x[(S.Length + 1)..]).ToList();
+        Check(ids.SequenceEqual(want) && g.Handovers == 0 && g.HiddenSingles == singles, $"n={number}: {string.Join(",", ids)} 交手动 {g.Handovers} 隐藏后单选项 {g.HiddenSingles}");
+        Console.WriteLine($"   游戏伴音 n={number}：选择 {string.Join(" → ", g.Chosen)}；台词 {string.Join(",", ids)}；隐藏后单选项 {g.HiddenSingles} 次");
+    }
+    // 玩家手动点错（不经默认分支）：记入后回到菜单，同样只剩正确答案、按单选项处理；探测克隆沿用记录。
+    var e = new PlaybackEngine(pack); Check(e.ConfirmGameLine(S + "-s0"), "无法定位 s0"); e.Next(true);
+    Check(e.Mode == RunMode.Choice && e.CurrentId == S + "-q1", "未到 q1");
+    var wrong = e.AvailableOptions.First(o => o.Id == S + "-route-q1-w2");
+    ExplorationMemory.RecordCurrent(e, wrong); e.SelectBranch(e.AvailableOptions.IndexOf(wrong));
+    for (int i = 0; i < 6 && e.Mode != RunMode.Choice; i++) e.Next(true);
+    Check(e.CurrentId == S + "-q1" && e.Mode == RunMode.Choice, "答错后没有回到 q1");
+    Check(DefaultBranchPolicy.HiddenOptions(e).Select(o => o.Id).OrderBy(x => x).SequenceEqual(new[] { S + "-route-q1-w1", S + "-route-q1-w2" }), "隐藏项错误");
+    Check(DefaultBranchPolicy.IsSingleOptionMenu(e) && DefaultBranchPolicy.TryChoice(e, 2, out var only, out _) && only!.Id == S + "-route-q1-r", "答错后没有按单选项取正确答案");
+    var probe = new PlaybackEngine(pack); Check(probe.ImportNavigation(e.ExportNavigation()), "探测克隆导入失败"); ExplorationMemory.CopyTo(e, probe);
+    if (probe.Mode != RunMode.Choice || probe.CurrentId != S + "-q1") Check(probe.OpenGameMenu(S + "-q1", S), "探测克隆无法回到 q1：" + probe.Mode + " " + probe.CurrentId);
+    Check(DefaultBranchPolicy.IsSingleOptionMenu(probe), "探测克隆没有沿用隐藏记录");
+});
+string liveCh19 = Environment.GetEnvironmentVariable("LIVE_CH19") ?? "/workspace/fixture047/ch19/pack-5ca198d0.json";
+if (File.Exists(liveCh19))
+    Test("同回应隐藏（现行 ch19 5ca198d0）：19-14 何为希望 听书第一 / 第二 / 手动与游戏伴音——每题错误回应至多一次，随后正确答案；0 停 0 重复", () =>
+    {
+        var pack = Pack.Load(liveCh19); const string Sec = "ch19-185fecd83dca9abdd3cc";
+        string w1 = pack.ById[Sec + "-2611b7e646192f3dc62e"].Text, w2 = pack.ById[Sec + "-71b09f2ac7dbb4abac1b"].Text;
+        string r1 = Sec + "-d12aa472bcc31a87fdff", r2 = Sec + "-2b3b76972a4313ddfac8";
+        foreach (var (policy, number) in new[] { (ListeningBranchPolicy.First, 1), (ListeningBranchPolicy.Second, 2), (ListeningBranchPolicy.Manual, 1), (ListeningBranchPolicy.Manual, 2) })
+        {
+            var r = QuizListen(pack, Sec, policy, number);
+            int a = Wrong(pack, r.Lines, w1), b = Wrong(pack, r.Lines, w2);
+            Check(r.Stops == 0 && r.Lines.Count == r.Lines.Distinct().Count() && a <= 1 && b <= 1 && r.Lines.Contains(r1) && r.Lines.Contains(r2), $"{policy}/{number}: {r.Lines.Count} 句 停 {r.Stops} 错误 {a}/{b}");
+            Console.WriteLine($"   听书 {policy}/默认{number}：19-14 {r.Lines.Count} 句，错误回应 {a}/{b}，0 停 0 重复");
+        }
+        foreach (var number in new[] { 1, 2 })
+        {
+            var g = QuizGame(pack, Sec, number);
+            int a = Wrong(pack, g.Played, w1), b = Wrong(pack, g.Played, w2);
+            Check(g.Handovers == 0 && g.Played.Count == g.Played.Distinct().Count() && a <= 1 && b <= 1 && g.Played.Contains(r1) && g.Played.Contains(r2),
+                $"游戏伴音 n={number}: {g.Played.Count} 句 交手动 {g.Handovers} 错误 {a}/{b}");
+            Console.WriteLine($"   游戏伴音 n={number}：19-14 {g.Played.Count} 句，错误回应 {a}/{b}，隐藏后单选项 {g.HiddenSingles} 次，0 交手动 0 重复");
+        }
+    });
+
+if (File.Exists(liveCh19))
+    Test("同回应隐藏白名单（现行 ch19 5ca198d0）：19-14 menu-000 / menu-001 按白名单原表 Action（A176 / A195）分组；改动错误答案文字（模拟错字修订）不影响；换包编号即不生效", () =>
+    {
+        const string Sec = "ch19-185fecd83dca9abdd3cc";
+        var live = Pack.Load(liveCh19);
+        foreach (var m in new[] { "-menu-000", "-menu-001" })
+        {
+            var shape = MenuShape.Of(live, live.ById[Sec + m]);
+            Check(MenuShape.MovieSource(live, live.ById[Sec + m]) == MenuShape.MatchAllowlist && shape.Quiz && shape.ResponseMatch.Values.Single() == MenuShape.MatchAllowlist, m + " 白名单没有生效");
+        }
+        // 错字修订模拟：只改一个错误答案节点的文字（两句不再同文），白名单按编号与原表 Action 分组，仍为问答菜单。
+        var w = live.ById[Sec + "-2611b7e646192f3dc62e"].Text;
+        var typo = QuizVariant(liveCh19, t =>
+        {
+            int i = t.IndexOf("\"id\": \"" + Sec + "-2611b7e646192f3dc62e\"", StringComparison.Ordinal);
+            int j = t.IndexOf("\"text\": \"", i, StringComparison.Ordinal) + "\"text\": \"".Length; int k = t.IndexOf('"', j);
+            return t[..j] + "（修订后的错误答案文字）" + t[k..];
+        }, "typo");
+        Check(typo.ById[Sec + "-2611b7e646192f3dc62e"].Text != w, "错字修订模拟没有生效");
+        Check(MenuShape.Of(typo, typo.ById[Sec + "-menu-000"]).Quiz, "改动错误答案文字后白名单失效");
+        var other = QuizVariant(liveCh19, t => t.Replace("\"id\": \"pgr-ch19\"", "\"id\": \"pgr-ch19-other\""), "other");
+        Check(other.Id == "pgr-ch19-other" && MenuShape.MovieSource(other, other.ById[Sec + "-menu-000"]) == null && !MenuShape.Of(other, other.ById[Sec + "-menu-000"]).Quiz, "白名单不应匹配其他包编号");
+    });
+if (File.Exists(liveCh29))
+    Test("同回应隐藏适用范围（现行 ch29 6d0e13cd）：29-1 所有菜单都不是 Movie 选择，0 个同回应分组；menu-020 不是问答菜单", () =>
+    {
+        var pack = Pack.Load(liveCh29); const string Sec = "ch29-1dc1158611c810722709";
+        var menus = pack.Nodes.Where(n => n.SectionId == Sec && n.Kind == "choice").ToList();
+        Check(menus.All(n => MenuShape.Of(pack, n).ResponseMatch.Count == 0), "29-1 出现同回应分组：" + string.Join(",", menus.Where(n => MenuShape.Of(pack, n).ResponseMatch.Count > 0).Select(n => n.Id)));
+        Check(!MenuShape.Of(pack, pack.ById[Sec + "-menu-020"]).Quiz && MenuShape.MovieSource(pack, pack.ById[Sec + "-menu-020"]) == null, "menu-020 仍被当作 Movie 问答菜单");
+    });
+
+string postCh29 = Environment.GetEnvironmentVariable("POST_CH29") ?? "/workspace/v31/edited/01_主线/第29章_源解信标/pack.json";
+if (File.Exists(postCh29))
+    Test("探索批次 v3.1 后 ch29（18458a11）29-1：听书第一 336 / 第二 327，menu-020 及其汇合点已归档——听书 / 游戏伴音都不进入；0 停 0 重复", () =>
+    {
+        var pack = Pack.Load(postCh29); const string Sec = "ch29-1dc1158611c810722709";
+        Check(pack.ById[Sec + "-menu-020"].Archived && pack.ById[Sec + "-menu-020-merge"].Archived, "夹具不是归档后的 ch29");
+        bool InMenu020(string id) => pack.ById[id].Archived || pack.ById[id].PathId.StartsWith(Sec + "-route-020", StringComparison.Ordinal) || id.StartsWith(Sec + "-menu-020", StringComparison.Ordinal);
+        foreach (var (policy, number, want) in new[] { (ListeningBranchPolicy.First, 1, 336), (ListeningBranchPolicy.Second, 2, 327), (ListeningBranchPolicy.Manual, 1, 336), (ListeningBranchPolicy.Manual, 2, 327) })
+        {
+            var r = QuizListen(pack, Sec, policy, number);
+            Check(r.Lines.Count == want && r.Lines.Distinct().Count() == want && r.Stops == 0 && !r.Lines.Any(InMenu020), $"{policy}/{number}: {r.Lines.Count} 句 停 {r.Stops}，预期 {want}");
+            Console.WriteLine($"   {policy}/默认{number}：29-1（18458a11）{r.Lines.Count} 句，0 停 0 重复，未进入 menu-020");
+        }
+        foreach (var number in new[] { 1, 2 })
+        {
+            var g = QuizGame(pack, Sec, number);
+            Check(g.Played.Count == g.Played.Distinct().Count() && !g.Played.Any(InMenu020) && !g.Chosen.Any(c => c.Contains("点方向")), $"游戏伴音 n={number}: {g.Played.Count} 句，进入归档 menu-020");
+            // QuizGame 只自动选可代选的菜单，到人物 / 话题菜单（游戏里由玩家选）即交手动；完整游戏伴音走查见桌面测试与 PgrBranchSim v2.2。
+            Console.WriteLine($"   游戏伴音 n={number}：29-1（18458a11）自动段 {g.Played.Count} 句后交玩家选择 {g.Handovers} 次，未进入 menu-020");
+        }
+    });
+
+string Slice(string src, string startMark, string? endMark)
+{
+    int start = src.IndexOf(startMark, StringComparison.Ordinal); Check(start >= 0, "找不到 " + startMark);
+    int end = endMark == null ? src.Length : src.IndexOf(endMark, start, StringComparison.Ordinal);
+    Check(end > start, "找不到结尾 " + endMark);
+    return src[start..end];
+}
+// ---------------- 0.4.7 游戏配音倒计时（设计 08 / 10 / 11；core/Following/PlayAlongCountdown.cs + AppSession.GameCountdown.cs） ----------------
+string playAlongFile = File.Exists("PlayAlong.pack.json") ? Path.GetFullPath("PlayAlong.pack.json")
+    : "/workspace/build/rel047/android/Tests/ListeningDefaultBranch/PlayAlong.pack.json";
+PlaybackEngine PlayAlongAt(Pack pack, string lineId) { var e = new PlaybackEngine(pack); Check(e.ConfirmGameLine(lineId), "无法定位 " + lineId + "：" + e.NavigationError); return e; }
+Test("游戏配音倒计时·普通分支：15 秒，默认第一 / 第二（第二不存在按第一），到点才选；暂停冻结剩余时间；用户点选优先", () =>
+{
+    var pack = Pack.Load(playAlongFile); const string S = "pa-sec";
+    var e = PlayAlongAt(pack, S + "-s0"); e.Next(true);
+    Check(e.Mode == RunMode.Choice && e.CurrentId == S + "-m1", "没有到达普通分支菜单：" + e.CurrentId + " " + e.Mode);
+    var c = PlayAlongCountdown.ForMenu(pack, e.Current!, e.AvailableOptions, 1, true, 1_000)!;
+    Check(c is { Kind: PlayAlongCountdownKind.Branch, Waiting: false, Ending: false, Counting: true } && c.DefaultOptionLabel == "去左边" && c.DefaultNumber == 1, "默认第一项倒计时不对");
+    Check(c.RemainingSeconds(1_000) == 15 && c.RemainingSeconds(1_001) == 15 && c.RemainingSeconds(15_000) == 1 && !c.Expired(15_999) && c.Expired(16_000) && c.RemainingSeconds(16_000) == 0, "15 秒计时 / 到点不对");
+    Check(c.StatusText(1_000) == "分支自动选择 · 15 秒后按默认分支自动选择「去左边」（第一个选项）；点选项立即选择。", "倒计时文字：" + c.StatusText(1_000));
+    Check(c.AutoSelectedText == "已自动选择：去左边", "到点事件文字：" + c.AutoSelectedText);
+    var two = PlayAlongCountdown.ForMenu(pack, e.Current!, e.AvailableOptions, 2, true, 0)!;
+    Check(two.DefaultOptionLabel == "去右边" && two.DefaultNumber == 2, "默认第二项不对");
+    var onlyOne = PlayAlongCountdown.ForMenu(pack, e.Current!, e.AvailableOptions.Take(1).ToList(), 2, true, 0)!;
+    Check(onlyOne.DefaultOptionLabel == "去左边" && onlyOne.DefaultNumber == 1, "只有一个可见选项时第二没有回落到第一");
+    // 暂停：5 秒时暂停，剩余 10 秒冻结；60 秒后继续，再过 10 秒才到点。
+    var p = PlayAlongCountdown.ForMenu(pack, e.Current!, e.AvailableOptions, 1, true, 0)!;
+    Check(p.TogglePause(5_000) && p.Paused && !p.Counting && p.RemainingSeconds(60_000) == 10 && !p.Expired(60_000), "暂停没有冻结剩余时间");
+    Check(p.StatusText(60_000) == PlayAlongCountdown.PausedText, "暂停文字：" + p.StatusText(60_000));
+    Check(!p.TogglePause(60_000) && p.Counting && p.RemainingSeconds(60_000) == 10 && !p.Expired(69_999) && p.Expired(70_000), "继续后没有从冻结处接着倒数");
+    p.Finish(); Check(!p.Expired(1_000_000) && p.RemainingSeconds(1_000_000) == 0, "结束后仍会到点");
+    // 到点按默认分支选入（与原来立即选择相同的 DefaultBranchPolicy 路径）。
+    Check(DefaultBranchPolicy.TryChoice(e, 1, out var o1, out var f1) && o1!.Label == "去左边" && f1!.Id == S + "-a1", "到点默认第一项不能选入");
+    Check(DefaultBranchPolicy.TryChoice(e, 2, out var o2, out var f2) && o2!.Label == "去右边" && f2!.Id == S + "-b1", "到点默认第二项不能选入");
+    // 用户点选优先：第三项（不是默认序号）也能选入。
+    Check(DefaultBranchPolicy.TryChoice(e, 1, out var o3, out var f3, null, S + "-route-o3") && o3!.Label == "原地等待" && f3!.Id == S + "-c1", "用户点选第三项不能选入");
+    Check(!DefaultBranchPolicy.TryChoice(e, 1, out _, out _, null, "no-such-option"), "不存在的选项被选入");
+    Check(DefaultBranchPolicy.Enter(e, o3, f3!) && e.CurrentId == S + "-c1", "用户选项选入后没有停在首句");
+});
+Test("游戏配音倒计时·暂停/继续不写「停下」播放记录（与听书一致，避免导出 CSV 停下数膨胀）", () =>
+{
+    // AppSession.ToggleGameCountdownPause 旧实现误用 Types.Stop 记「倒计时已暂停 / 倒计时继续」；听书暂停倒计时不写任何行。
+    string gameCs = new[] {
+        Path.Combine("..", "..", "AppSession.GameCountdown.cs"),
+        "/workspace/build/rel047/android/AppSession.GameCountdown.cs",
+    }.Select(Path.GetFullPath).First(File.Exists);
+    string src = File.ReadAllText(gameCs);
+    int start = src.IndexOf("public bool ToggleGameCountdownPause()", StringComparison.Ordinal);
+    Check(start >= 0, "找不到 ToggleGameCountdownPause");
+    int end = src.IndexOf("public bool ChooseGameCountdownOption", start);
+    Check(end > start, "找不到 ToggleGameCountdownPause 方法体结尾");
+    string method = src[start..end];
+    Check(!method.Contains("LogGame") && !method.Contains("PlaybackLog"), "暂停/继续仍在写播放记录");
+    Check(!method.Contains("Types.Stop") && !method.Contains("\"停下\""), "暂停/继续仍引用 Types.Stop");
+    // 运行时：倒计时对象本身的暂停 / 继续也不应产生播放记录（记录只应由 AppSession / ListeningSession 写入）。
+    PlaybackLog.Recent.Clear();
+    var pack = Pack.Load(playAlongFile); const string S = "pa-sec";
+    var e = PlayAlongAt(pack, S + "-s0"); e.Next(true);
+    var c = PlayAlongCountdown.ForMenu(pack, e.Current!, e.AvailableOptions, 1, true, 0)!;
+    Check(c.TogglePause(5_000) && !c.TogglePause(60_000), "暂停 / 继续切换失败");
+    Check(!PlaybackLog.Recent.Any(r => r.Contains("," + PlaybackLog.Types.Stop + ",")), "暂停 / 继续产生了停下记录：" + string.Join("|", PlaybackLog.Recent));
+    Check(!PlaybackLog.Recent.Any(r => r.Contains("倒计时已暂停") || r.Contains("倒计时继续")), "暂停 / 继续写了播放记录：" + string.Join("|", PlaybackLog.Recent));
+    // 对照：真正的停下仍可正常写入 Types.Stop（保证断言不是“Recent 坏了”）。
+    PlaybackLog.Write(PlaybackLog.Types.Stop, "自动播放", pack, "c", "s", S + "-m1", "支线待选", "去左边");
+    Check(PlaybackLog.Recent.Count(r => r.Contains("," + PlaybackLog.Types.Stop + ",")) == 1, "对照停下记录没有写入");
+});
+Test("游戏配音倒计时·设置变更时保持暂停与剩余秒数（关闭记住、再开启恢复；改默认项不重置、不写停下）", () =>
+{
+    var pack = Pack.Load(playAlongFile); const string S = "pa-sec";
+    var e = PlayAlongAt(pack, S + "-s0"); e.Next(true);
+    // 暂停后改默认分支：RestorePause 保持 10 秒与暂停态，默认项文字换成第二项。
+    var paused = PlayAlongCountdown.ForMenu(pack, e.Current!, e.AvailableOptions, 1, true, 0)!;
+    Check(paused.TogglePause(5_000) && paused.RemainingMilliseconds(5_000) == 10_000, "预置暂停失败");
+    var remapped = PlayAlongCountdown.ForMenu(pack, e.Current!, e.AvailableOptions, 2, true, 100_000, PlayAlongCountdown.PrecedingLine(e))!;
+    remapped.RestorePause(100_000, paused.RemainingMilliseconds(5_000));
+    Check(remapped is { Paused: true, DefaultOptionLabel: "去右边", DefaultNumber: 2 } && remapped.RemainingSeconds(200_000) == 10 && !remapped.Expired(200_000),
+        "改默认项后没有保持暂停 / 剩余 / 新默认项：" + remapped.DefaultOptionLabel + " " + remapped.RemainingSeconds(200_000));
+    // 关闭自动选择 → Waiting；再开启时用记住的剩余恢复暂停（模拟 AppSession 冻结字段）。
+    long frozen = paused.RemainingMilliseconds(5_000);
+    var off = PlayAlongCountdown.ForMenu(pack, e.Current!, e.AvailableOptions, 1, false, 0)!;
+    Check(off.Waiting && off.RemainingSeconds(0) == 0, "关闭后没有停下等待");
+    var on = PlayAlongCountdown.ForMenu(pack, e.Current!, e.AvailableOptions, 1, true, 50_000)!;
+    on.RestorePause(50_000, frozen);
+    Check(on.Paused && on.RemainingSeconds(50_000) == 10 && !on.Counting, "再开启没有恢复暂停与剩余");
+    // 进行中改设置：ContinueWithRemaining 不重置为 15。
+    var counting = PlayAlongCountdown.ForMenu(pack, e.Current!, e.AvailableOptions, 1, true, 0)!;
+    var kept = PlayAlongCountdown.ForMenu(pack, e.Current!, e.AvailableOptions, 2, true, 8_000)!;
+    kept.ContinueWithRemaining(8_000, counting.RemainingMilliseconds(5_000));
+    Check(kept is { Paused: false, Counting: true, DefaultNumber: 2 } && kept.RemainingSeconds(8_000) == 10 && kept.Expired(18_000),
+        "进行中改默认项重置了剩余：" + kept.RemainingSeconds(8_000));
+    // AppSession.RefreshGameCountdownForSettings / SetDefaultBranchOption：暂停时不 Invalidate、不写停下。
+    string gameCs = new[] { Path.Combine("..", "..", "AppSession.GameCountdown.cs"), "/workspace/build/rel047/android/AppSession.GameCountdown.cs" }.Select(Path.GetFullPath).First(File.Exists);
+    string refresh = Slice(File.ReadAllText(gameCs), "void RefreshGameCountdownForSettings()", "bool TryOverlayNextDuringGameCountdown()");
+    Check(refresh.Contains("RestorePause") && refresh.Contains("ContinueWithRemaining") && refresh.Contains("gameCountdownFrozen"), "Refresh 没有衔接暂停 / 冻结");
+    Check(!refresh.Contains("LogGame") && !refresh.Contains("PlaybackLog"), "Refresh 仍写播放记录");
+    string defCs = new[] { Path.Combine("..", "..", "AppSession.DefaultBranch.cs"), "/workspace/build/rel047/android/AppSession.DefaultBranch.cs" }.Select(Path.GetFullPath).First(File.Exists);
+    string setDef = Slice(File.ReadAllText(defCs), "public void SetDefaultBranchOption(int number)", "static string DefaultBranchName");
+    Check(setDef.Contains("gameCountdown == null") && setDef.Contains("Invalidate()"), "改默认分支在倒计时中仍会无条件 Invalidate");
+});
+Test("游戏配音倒计时·悬浮「暂停」= ToggleGameCountdownPause；「下一句」仅在真能挪动时结束倒计时", () =>
+{
+    string appCs = new[] { Path.Combine("..", "..", "AppSession.cs"), "/workspace/build/rel047/android/AppSession.cs" }.Select(Path.GetFullPath).First(File.Exists);
+    string overlay = Slice(File.ReadAllText(appCs), "case OverlayCommand.Next:", "case OverlayCommand.Original:");
+    Check(overlay.Contains("ToggleGameCountdownPause()") && overlay.Contains("gameCountdown is {Waiting:false,Finished:false}"),
+        "悬浮暂停没有走 ToggleGameCountdownPause");
+    Check(overlay.Contains("TryOverlayNextDuringGameCountdown()") && overlay.Contains("Command(e=>e.Next(true))"),
+        "悬浮下一句没有先探测再决定是否结束倒计时");
+    string gameCs = new[] { Path.Combine("..", "..", "AppSession.GameCountdown.cs"), "/workspace/build/rel047/android/AppSession.GameCountdown.cs" }.Select(Path.GetFullPath).First(File.Exists);
+    string probe = Slice(File.ReadAllText(gameCs), "bool TryOverlayNextDuringGameCountdown()", null);
+    Check(probe.Contains("probe.Next(true)") && probe.Contains("beforeId") && probe.Contains("return true"),
+        "下一句探测逻辑不完整");
+    // 运行时：普通分支菜单上 Next 不挪动（仍停在 Choice）——对应「保持倒计时」。
+    var pack = Pack.Load(playAlongFile); const string S = "pa-sec";
+    var e = PlayAlongAt(pack, S + "-s0"); e.Next(true);
+    Check(e.Mode == RunMode.Choice && e.CurrentId == S + "-m1", "没有在分支菜单");
+    string before = e.CurrentId!; var beforeMode = e.Mode;
+    e.Next(true);
+    Check(e.CurrentId == before && e.Mode == beforeMode, "分支菜单上 Next 不应挪动（否则悬浮下一句会误取消倒计时）");
+});
+Test("探索面板 Of：结果不变；同 key 命中缓存；探索记忆变更后已读更新", () =>
+{
+    var pack = Pack.Load(emptyExitFile); const string Sec = "syn-sec";
+    var e = new PlaybackEngine(pack); Check(e.ConfirmGameLine(Sec + "-n1"), "无法定位探索选项台词：" + e.NavigationError);
+    var a = ExplorationPanel.Of(e); var b = ExplorationPanel.Of(e);
+    Check(a != null && ReferenceEquals(a, b), "同 key 没有命中面板缓存");
+    Check(a!.MenuId == Sec + "-menu" && a.Options.Count >= 3 && a.Options.Any(o => o.Current && o.Id == Sec + "-route-n"), "面板内容不对");
+    // 对照：未缓存路径的语义——已读变更后 Heard 必须更新（Invalidate）。
+    ExplorationMemory.Add(e, Sec + "-menu", Sec + "-route-e");
+    var c = ExplorationPanel.Of(e);
+    Check(c != null && !ReferenceEquals(a, c), "探索记忆变更后仍返回旧面板");
+    Check(c!.Options.First(o => o.Id == Sec + "-route-e").Heard && c.HeardCount == 2, "已读状态没有更新");
+    var common = new PlaybackEngine(pack); Check(common.ConfirmGameLine(Sec + "-s0"), "无法定位共同句");
+    Check(ExplorationPanel.Of(common) == null, "共同线给出了探索面板");
+    // OwningOption 索引：同一 path 多次查询结果稳定。
+    var line = pack.ById[Sec + "-n1"];
+    var o1 = PlayAlongCountdown.OwningOption(pack, line, out var m1);
+    var o2 = PlayAlongCountdown.OwningOption(pack, line, out var m2);
+    Check(o1 != null && o1.Id == o2!.Id && m1!.Id == m2!.Id, "OwningOption 缓存结果不稳定");
+});
+Test("游戏配音倒计时·结局分歧同样倒计时（到点按默认分支选入一个结局、可暂停、Ending 标记）；只有「分支自动选择」关闭时停下等待；单选项 / 探索菜单不倒计时（返回 null）", () =>
+{
+    var pack = Pack.Load(playAlongFile); const string S = "pa-sec";
+    var e = PlayAlongAt(pack, S + "-s1"); e.Next(true);
+    Check(e.Mode == RunMode.Choice && e.CurrentId == S + "-m2", "没有到达结局菜单：" + e.CurrentId);
+    var ending = PlayAlongCountdown.ForMenu(pack, e.Current!, e.AvailableOptions, 1, true, 0)!;
+    Check(ending is { Ending: true, Waiting: false, Counting: true } && ending.RemainingSeconds(0) == 15 && !ending.Expired(14_999) && ending.Expired(15_000), "结局分歧没有同样倒计时 15 秒");
+    Check(ending.DefaultOptionLabel == "开启结局：黎明" && ending.AutoSelectedText == "已自动选择：开启结局：黎明", "结局默认第一项 / 已自动选择文字不对");
+    Check(ending.StatusText(0) == "结局分歧 · 15 秒后按默认分支选入结局「开启结局：黎明」（第一个选项）；只收听所选结局，点选项立即选择。", "结局倒计时文字：" + ending.StatusText(0));
+    Check(ending.TogglePause(3_000) && ending.RemainingSeconds(99_000) == 12 && !ending.Expired(99_000) && ending.StatusText(0) == PlayAlongCountdown.PausedText, "结局倒计时不能暂停");
+    var ending2 = PlayAlongCountdown.ForMenu(pack, e.Current!, e.AvailableOptions, 2, true, 0)!;
+    Check(ending2.DefaultOptionLabel == "开启结局：黄昏" && ending2.DefaultNumber == 2, "结局默认第二项不对");
+    // 到点按默认分支选入一个结局（与普通分支同一 DefaultBranchPolicy 路径），只读该结局正文。
+    Check(DefaultBranchPolicy.TryChoice(e, 2, out var eo, out var ef) && eo!.Label == "开启结局：黄昏" && ef!.Id == S + "-eb1", "到点不能选入默认结局");
+    var endingOff = PlayAlongCountdown.ForMenu(pack, e.Current!, e.AvailableOptions, 1, false, 0)!;
+    Check(endingOff is { Ending: true, Waiting: true, Counting: false } && !endingOff.Expired(1_000_000) && endingOff.StatusText(0) == PlayAlongCountdown.EndingAutoSelectOffText && !endingOff.TogglePause(0), "关闭分支自动选择后结局没有停下等待");
+    var e1 = PlayAlongAt(pack, S + "-s0"); e1.Next(true);
+    var off = PlayAlongCountdown.ForMenu(pack, e1.Current!, e1.AvailableOptions, 1, false, 0)!;
+    Check(off is { Waiting: true, Ending: false } && !off.Expired(1_000_000) && off.StatusText(0) == PlayAlongCountdown.AutoSelectOffText, "关闭分支自动选择后没有停下等待");
+    // 单选项（空出口合成包的「进入营地」）与探索菜单（同包「选择路线」）不倒计时，保持原来的立即处理。
+    var ex = Pack.Load(emptyExitFile);
+    Check(PlayAlongCountdown.ForMenu(ex, ex.ById["syn-sec-m0"], null, 1, true, 0) == null, "单选项菜单开始了倒计时");
+    Check(PlayAlongCountdown.ForMenu(ex, ex.ById["syn-sec-menu"], null, 1, true, 0) == null, "探索菜单开始了倒计时");
+    Check(PlayAlongCountdown.ForMenu(pack, pack.ById[S + "-s0"], null, 1, true, 0) == null, "台词节点开始了分支倒计时");
+});
+Test("游戏配音倒计时·未核出口（等待确认续接）：缺口处 15 秒后从本节下一句按顺序继续；已读跳过；关闭时停下等待；死角 / 分支 / 终点不在此列", () =>
+{
+    var pack = Pack.Load(playAlongFile); const string S = "pa-sec";
+    var e = PlayAlongAt(pack, S + "-s2");
+    var decision = e.EvaluateCommonAutoPlayNext();
+    Check(!decision.Allowed && decision.Code == "gap" && PlayAlongCountdown.IsUnverifiedExitCode(decision.Code), "缺口前没有判为未核出口：" + decision.Code);
+    foreach (var code in new[] { "choice", "branch", "next-branch", "end", "missing-next", "invalid-next", "cycle", "navigation-mismatch", null })
+        Check(!PlayAlongCountdown.IsUnverifiedExitCode(code), "误判为未核出口：" + code);
+    var c = PlayAlongCountdown.ForUnverifiedExit(pack, e.Current!, new HashSet<string>(), true, 0)!;
+    Check(c is { Kind: PlayAlongCountdownKind.OrderContinue, Waiting: false } && c.OrderLineId == S + "-s3" && c.Expired(15_000) && !c.Expired(14_999), "按顺序续接目标 / 计时不对：" + c.OrderLineId);
+    Check(c.StatusText(0).Contains("15 秒后从本节下一句按顺序继续") && c.AutoSelectedText == ListeningText.OrderContinued, "按顺序续接文字不对");
+    Check(PlayAlongCountdown.ForUnverifiedExit(pack, e.Current!, new HashSet<string> { S + "-s3" }, true, 0)!.OrderLineId == S + "-s4", "已读台词没有跳过");
+    Check(PlayAlongCountdown.ForUnverifiedExit(pack, pack.ById[S + "-s4"], new HashSet<string>(), true, 0) == null, "本节最后一句后仍给出续接");
+    var off = PlayAlongCountdown.ForUnverifiedExit(pack, e.Current!, new HashSet<string>(), false, 0)!;
+    Check(off.Waiting && !off.Expired(1_000_000) && off.StatusText(0) == PlayAlongCountdown.OrderAutoSelectOffText, "关闭分支自动选择后没有停下等待");
+    // 缺口之后的台词不在已核共同线上：真实导航器副本能定位，但不能从那里继续自动播放 → 安卓 TryBeginGameOrderCountdown 不倒计时，保持原来的暂停（安全门不放宽）。
+    var probe = new PlaybackEngine(pack); Check(probe.ImportNavigation(e.ExportNavigation()) && probe.ConfirmGameLine(c.OrderLineId!), "按顺序续接定位失败：" + probe.NavigationError);
+    Check(probe.CurrentId == S + "-s3" && !probe.EvaluateCommonAutoPlayNext().CurrentIsCommon, "缺口后的台词被当作已核共同线");
+    // 选项正文读完、出口未核（默认路线读到头）：跳过其他选项的正文，续接到汇合后的共同句；从那里可以继续自动播放。
+    var a1 = pack.ById[S + "-a1"];
+    var fromBranch = PlayAlongCountdown.ForUnverifiedExit(pack, a1, new HashSet<string>(), true, 0)!;
+    Check(fromBranch.OrderLineId == S + "-s1", "没有跳过其他选项的正文：" + fromBranch.OrderLineId);
+    var eb = PlayAlongAt(pack, S + "-s0"); eb.Next(true);
+    Check(DefaultBranchPolicy.TryChoice(eb, 1, out var oa, out var fa) && DefaultBranchPolicy.Enter(eb, oa!, fa!) && eb.CurrentId == S + "-a1", "没有选入第一项正文");
+    var pb = new PlaybackEngine(pack); Check(pb.ImportNavigation(eb.ExportNavigation()) && pb.ConfirmGameLine(fromBranch.OrderLineId!), "续接到共同句定位失败：" + pb.NavigationError);
+    Check(pb.CurrentId == S + "-s1" && pb.Mode == RunMode.Following && pb.EvaluateCommonAutoPlayNext().CurrentIsCommon, "汇合后的共同句不能继续自动播放");
+});
+Test("游戏配音倒计时·自动播放周期：等待确认续接（WaitingForGame，不超时）→ ResumeTapping → 点击下一句", () =>
+{
+    var cycle = new AutoPlaybackCycle(); cycle.Start("a", 0); long ep = cycle.Epoch;
+    Check(cycle.PreparePlayback(ep, "a", 0) && cycle.BindAudio(ep, "a", 1, 0) && cycle.CompleteAudio(ep, 1, 100), "起播 / 播完失败");
+    Check(cycle.BeginWaiting(ep, "a") && cycle.WaitingForGame && !cycle.TimedOut(10_000_000), "等待时超时或没有进入等待");
+    Check(!cycle.ResumeTapping(ep, "b", 20_000) && !cycle.ResumeTapping(ep + 1, "a", 20_000), "错误的节点 / 代次也能恢复点击");
+    Check(cycle.ResumeTapping(ep, "a", 20_000) && cycle.Phase == AutoPlaybackPhase.Tapping && cycle.BeginTap(ep, "b", 20_000) && cycle.GestureCompleted(ep, cycle.TapTicket, "b", 20_100), "恢复点击后不能点击下一句");
+    Check(!cycle.ResumeTapping(ep, "a", 20_200), "非等待状态也能恢复点击");
+});
+
+Test("游戏配音倒计时·界面数据：菜单前句、刚读完的所选选项、选入提示按实际选项序号（用户点第三项为「分支三」，原来误用默认序号「分支一」）", () =>
+{
+    var pack = Pack.Load(playAlongFile); const string S = "pa-sec";
+    var e = PlayAlongAt(pack, S + "-s0"); e.Next(true);
+    var before = PlayAlongCountdown.PrecedingLine(e);
+    Check(e.CurrentId == S + "-m1" && before?.Id == S + "-s0", "菜单前句不对：" + before?.Id);
+    var c = PlayAlongCountdown.ForMenu(pack, e.Current!, e.AvailableOptions, 1, true, 0, before)!;
+    Check(c.PrecedingLineId == S + "-s0" && c.PrecedingSpeaker == "指挥官" && c.PrecedingText == "前面就是岔路口。" && c.PreviousOptionLabel == null, "倒计时没有带上菜单前句");
+    var fromA = PlayAlongCountdown.ForUnverifiedExit(pack, pack.ById[S + "-a1"], new HashSet<string>(), true, 0)!;
+    Check(fromA.PreviousOptionLabel == "去左边" && fromA.PrecedingLineId == S + "-a1", "刚读完的所选选项不对：" + fromA.PreviousOptionLabel);
+    Check(PlayAlongCountdown.ForUnverifiedExit(pack, pack.ById[S + "-s2"], new HashSet<string>(), true, 0)!.PreviousOptionLabel == null, "共同线句子给出了所选选项");
+    var menu = pack.ById[S + "-m1"];
+    Check(DefaultBranchPolicy.TryChoice(e, 1, out var user, out _, null, S + "-route-o3") && DefaultBranchPolicy.EnteredText(menu, user!) == "进入分支三：原地等待",
+        "用户点第三项的选入提示：" + DefaultBranchPolicy.EnteredText(menu, user!));
+    Check(DefaultBranchPolicy.TryChoice(e, 2, out var def2, out _) && DefaultBranchPolicy.EnteredText(menu, def2!) == "进入分支二：去右边", "默认第二项的选入提示不对");
+    Check(DefaultBranchPolicy.TryChoice(e, 2, out var user1, out _, null, S + "-route-o1") && DefaultBranchPolicy.EnteredText(menu, user1!) == "进入分支一：去左边", "默认第二、用户点第一项时提示不对");
+});
+Test("游戏配音界面数据：无音频句停留的开始时刻与总时长；探索面板（当前探索菜单、选项、已读 / 正在读 / 出口 / 空回环）", () =>
+{
+    var cycle = new AutoPlaybackCycle(); cycle.Start("a", 0); long ep = cycle.Epoch;
+    Check(cycle.PreparePlayback(ep, "a", 1_000) && cycle.BeginSilentPause(ep, "a", 1_000, 4_500), "停留开始失败");
+    Check(cycle.SilentPauseStarted == 1_000 && cycle.SilentPauseDuration == 4_500 && cycle.SilentPauseUntil == 5_500, "停留开始 / 时长不对");
+    Check(cycle.CompleteSilentPause(ep, "a", 5_500) && cycle.SilentPauseStarted == 0 && cycle.SilentPauseDuration == 0, "停留结束后没有清零");
+    Check(cycle.PreparePlayback(ep, "a", 0) == false, "停留结束后状态异常");
+    var c2 = new AutoPlaybackCycle(); c2.Start("b", 0); long e2 = c2.Epoch;
+    Check(c2.PreparePlayback(e2, "b", 0) && c2.BeginSilentPause(e2, "b", 200) && c2.SilentPauseDuration == AutoPlaybackCycle.SilentPauseMilliseconds, "标点停顿时长不对");
+    var pack = Pack.Load(emptyExitFile); const string Sec = "syn-sec";
+    var e = new PlaybackEngine(pack); Check(e.ConfirmGameLine(Sec + "-n1"), "无法定位探索选项台词：" + e.NavigationError);
+    var panel = ExplorationPanel.Of(e);
+    Check(panel != null && panel.MenuId == Sec + "-menu" && panel.MenuText == "选择路线", "没有给出当前探索菜单");
+    var opts = panel!.Options.ToDictionary(o => o.Id);
+    Check(opts[Sec + "-route-n"] is { Current: true, Heard: true, Exit: false, EmptyLoop: false }, "正在读的回环状态不对");
+    Check(opts[Sec + "-route-e"] is { EmptyLoop: true, Current: false, Heard: false }, "空回环状态不对");
+    Check(opts[Sec + "-route-x"] is { Exit: true, Current: false, Heard: false }, "出口状态不对");
+    ExplorationMemory.Add(e, Sec + "-menu", Sec + "-route-e");
+    Check(ExplorationPanel.Of(e)!.Options.First(o => o.Id == Sec + "-route-e").Heard && ExplorationPanel.Of(e)!.HeardCount == 2, "已读状态没有更新");
+    var common = new PlaybackEngine(pack); Check(common.ConfirmGameLine(Sec + "-s0"), "无法定位共同句");
+    Check(ExplorationPanel.Of(common) == null, "共同线给出了探索面板");
+    var pa = Pack.Load(playAlongFile); var branch = new PlaybackEngine(pa); Check(branch.ConfirmGameLine("pa-sec-a1"), "无法定位普通分支句：" + branch.NavigationError);
+    Check(ExplorationPanel.Of(branch) == null, "普通分支给出了探索面板");
+});
+
+Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+File.WriteAllText(output, JsonSerializer.Serialize(new { createdUtc = DateTimeOffset.UtcNow, passed = failures == 0, count = results.Count, failures, tests = results, packFile,
+    scope = "直接编译共享听书规划、安卓真实 ListeningSession.cs、DefaultBranchPolicy.cs 与 DeclaredContinuationPolicy.cs，使用第38章真实 pack.json 元数据（无音频，台词按未收录跳过）。不验证真机界面、OCR 与悬浮窗绘制。" }, Json.Options));
+Console.WriteLine($"ListeningDefaultBranch: {results.Count - failures}/{results.Count} passed; report={output}");
+return failures == 0 ? 0 : 1;
+
+sealed class Fixture : IChapterStorage
+{
+    public string Root { get; } = Path.Combine(Path.GetTempPath(), "listening-default-branch", Guid.NewGuid().ToString("N"));
+    readonly Pack pack;
+    public Fixture(Pack pack) { this.pack = pack; Directory.CreateDirectory(Root); }
+    public AndroidSession Open(Func<int> option, string? chapterId = null, Func<bool>? autoSelect = null)
+    {
+        var session = new AndroidSession(new(Root), this, () => { }, new(), null, option, autoSelect);
+        session.Open(pack.Id, chapterId ?? pack.Chapters.First(c => c.Sections.Any(s => s.Id == "ch38-71dc2c5d361c068b1528")).Id); return session;
+    }
+    public Pack Load(string packId) => pack;
+    public IReadOnlyList<InstalledPackage> List() => [];
+    public InstalledPackage? Find(string packId) => null;
+    public void CleanAbandonedImports() { }
+    public Task<InstalledPackage> ImportAsync(Stream zipStream, CancellationToken cancellationToken = default, IProgress<PackageImportProgress>? progress = null) => throw new NotSupportedException();
+    public Task<PackageRemovalResult> RemoveAsync(string packId, string expectedRevision) => throw new NotSupportedException();
+    public PackageFolder Browse(string packId, string relativePath = "", string? expectedRevision = null) => throw new NotSupportedException();
+}

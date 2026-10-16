@@ -1,0 +1,159 @@
+using System.Text.Json;
+using Android.OS;
+using PgrVoice;
+using PgrVoice.AndroidApp;
+using PgrVoice.AndroidApp.Contracts;
+using PgrVoice.AndroidApp.Platform;
+using PgrVoice.Listening;
+using PgrVoice.Packages;
+using AndroidSession = PgrVoice.AndroidApp.ListeningSession;
+
+var results = new List<object>(); int failures = 0;
+void Check(bool value, string reason) { if (!value) throw new Exception(reason); }
+void Test(string name, Action test)
+{
+    try { test(); results.Add(new { name, passed = true }); Console.WriteLine("PASS " + name); }
+    catch (Exception ex) { failures++; results.Add(new { name, passed = false, error = ex.ToString() }); Console.WriteLine("FAIL " + name + ": " + ex.Message); }
+}
+
+var gameEntries = new (string Name, Action<Fixture> Invoke)[]
+{
+    ("显示游戏悬浮", f => f.Owner.ShowOverlay()),
+    ("历史试听", f => f.Owner.PreviewNode(f.Native)),
+    ("游戏操作", f => f.Owner.Command(e => e.PauseForBrowse())),
+    ("确认当前句", f => f.Owner.ConfirmCurrent()),
+    ("请求捕获", f => f.Owner.PrepareCapture()),
+    ("OCR定位", f => f.Owner.RequestOcr()),
+};
+foreach (var entry in gameEntries)
+{
+    Test(entry.Name + "：冻结听书倒计时，过期计时回调不能抢回听书", () =>
+    {
+        using var f = new Fixture(); f.AtBranch(); Handler.Advance(2_000);
+        Check(f.Session.CountdownRemaining == 13 && !f.Session.IsPlaying, "倒计时前提错误");
+        var stale = Handler.PendingCallbacks;
+        f.Owner.SetOverlayVisible(); entry.Invoke(f); int previous = f.Owner.Invalidations;
+        Handler.Advance(30_000); foreach (var callback in stale) callback();
+        Check(f.Session.CountdownPaused && f.Session.CountdownRemaining == 13, "倒计时未冻结在13秒");
+        Check(f.Owner.OverlayVisible && f.Owner.Invalidations == previous, "旧倒计时重新进入听书并停止游戏");
+    });
+}
+Test("游戏入口重复进入不重置秒数，明确继续听书从原13秒续计", () =>
+{
+    using var f = new Fixture(); f.AtBranch(); Handler.Advance(2_000);
+    f.Owner.ShowOverlay(); f.Owner.ShowOverlay();
+    Check(f.Session.CountdownPaused && f.Session.CountdownRemaining == 13, "重复进入重置或恢复倒计时");
+    int before = f.Owner.Invalidations;
+    f.Session.MediaPlay(); Handler.Advance(12_000);
+    Check(!f.Session.CountdownPaused && f.Session.CountdownRemaining == 1 && f.Owner.OverlayVisible, "继续未从13秒起计");
+    Handler.Advance(1_000);
+    Check(f.Owner.Invalidations > before && !f.Owner.OverlayVisible, "用户明确继续听书后没有正常续接");
+});
+Test("没有收听或倒计时时，进入游戏不写听书暂停状态", () =>
+{
+    using var f = new Fixture(); string before = f.Session.Status;
+    f.Owner.ShowOverlay(); Check(f.Session.Status == before, "空闲听书被无故标成暂停");
+});
+Test("原配开关开启：历史试听有音量且请求音频焦点，保留剧情位置", () =>
+{
+    using var f = new Fixture();
+    Check(f.Owner.IsNativeVoiceLine(f.Owner.Engine, f.Native), "真实内置原配绑定未命中");
+    string? current = f.Owner.Engine!.CurrentId;
+    string history = JsonSerializer.Serialize(f.Owner.Engine.ExportNavigation(), Json.Options);
+    f.Owner.Settings.SpeakerVolumes[f.Native.Speaker] = 50;
+    f.Owner.PreviewNode(f.Native);
+    Check(f.Owner.GameAudio.FocusPlays == 1 && f.Owner.GameAudio.NoFocusPlays == 0, "试听仍使用无焦点静音占位");
+    Check(Math.Abs(f.Owner.GameAudio.Volume - .4f) < .0001f, "试听未应用总音量×角色音量");
+    Check(!f.Owner.NativePlaying && f.Owner.NativeUntil == 0, "试听残留原配播放/等待状态");
+    Check(f.Owner.Engine.CurrentId == current, "试听改变剧情位置");
+    Check(JsonSerializer.Serialize(f.Owner.Engine.ExportNavigation(), Json.Options) == history, "试听改写导航历史");
+});
+Test("原配开关开启：正常游戏播放仍静音占位且不申请焦点", () =>
+{
+    using var f = new Fixture(); f.Owner.PlayGameNode(f.Native);
+    Check(f.Owner.GameAudio.NoFocusPlays == 1 && f.Owner.GameAudio.FocusPlays == 0 && f.Owner.GameAudio.Volume == 0, "游戏原配静音行为被试听修复破坏");
+    Check(f.Owner.NativePlaying && f.Owner.NativeUntil > SystemClock.Now, "游戏原配时长等待丢失");
+});
+Test("关闭原配开关：正常游戏播放有音量与焦点", () =>
+{
+    using var f = new Fixture(); f.Owner.SetNativeVoiceMute(false); f.Owner.PlayGameNode(f.Native);
+    Check(f.Owner.GameAudio.FocusPlays == 1 && f.Owner.GameAudio.Volume > 0 && !f.Owner.NativePlaying, "关闭后仍静音");
+});
+Test("本章选择用配音包：正常游戏播放有音量与焦点", () =>
+{
+    using var f = new Fixture(); f.Owner.SetNativeVoiceForPack(f.GamePack.Id, false); f.Owner.PlayGameNode(f.Native);
+    Check(f.Owner.GameAudio.FocusPlays == 1 && f.Owner.GameAudio.Volume > 0 && !f.Owner.NativePlaying, "按章覆盖未保留");
+});
+Test("取消试听后，迟到的前台服务就绪回调不能播放", () =>
+{
+    using var f = new Fixture(); VoiceForegroundService.DelayReady = true;
+    f.Owner.PreviewNode(f.Native); Check(VoiceForegroundService.Pending.Count == 1, "未建立延迟播放");
+    f.Owner.CancelPendingPlayback(); VoiceForegroundService.Flush();
+    Check(f.Owner.GameAudio.Plays == 0, "过期试听回调仍播放");
+});
+Test("切换游戏章节后，迟到的试听回调不能播放旧章", () =>
+{
+    using var f = new Fixture(); VoiceForegroundService.DelayReady = true;
+    f.Owner.PreviewNode(f.Native); f.Owner.Engine = new PlaybackEngine(f.GamePack); VoiceForegroundService.Flush();
+    Check(f.Owner.GameAudio.Plays == 0, "旧引擎回调仍播放");
+});
+Test("游戏原配请求未就绪时开始试听，旧请求失效且试听不静音", () =>
+{
+    using var f = new Fixture(); VoiceForegroundService.DelayReady = true;
+    f.Owner.PlayGameNode(f.Native); f.Owner.PreviewNode(f.Native);
+    Check(VoiceForegroundService.Pending.Count == 2, "两个请求前提不成立");
+    VoiceForegroundService.Flush();
+    Check(f.Owner.GameAudio.Plays == 1 && f.Owner.GameAudio.FocusPlays == 1 && f.Owner.GameAudio.Volume > 0, "旧游戏请求或静音占位污染试听");
+});
+Test("12个游戏入口均使用统一听书互斥入口", () =>
+{
+    using var evidence = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "source-evidence.json")));
+    var entries = evidence.RootElement.GetProperty("entryBindings");
+    Check(entries.GetArrayLength() == 12, "入口清单数与本轮范围不符");
+    var missing = entries.EnumerateArray().Where(x => !x.GetProperty("usesPauseForGame").GetBoolean()).Select(x => x.GetProperty("method").GetString()).ToArray();
+    Check(missing.Length == 0, "仍有旧IsPlaying门控：" + string.Join("、", missing));
+});
+
+string output = Path.GetFullPath(args.Single());
+Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+File.WriteAllText(output, JsonSerializer.Serialize(new { createdUtc = DateTimeOffset.UtcNow, passed = failures == 0, count = results.Count, failures, tests = results,
+    scope = "真实ListeningSession、ListeningForegroundService、AppSession.Playback与共享核心；六个游戏入口以及PrepareListening/StopGame从当前源码完整原样抽取。Android时钟、通知、音频和窗口受控替身；其余6个入口核源码接线。未验证真机解码、焦点/窗口系统行为。" }, Json.Options));
+Console.WriteLine($"AudioModeRegression: {results.Count - failures}/{results.Count}; report={output}");
+return failures == 0 ? 0 : 1;
+
+sealed class Fixture : IChapterStorage, IDisposable
+{
+    public string Root { get; } = Path.Combine(Path.GetTempPath(), "pgr-audio-mode-" + Guid.NewGuid().ToString("N"));
+    readonly Pack listeningPack;
+    public Pack GamePack { get; }
+    public Node Native { get; }
+    public AndroidSession Session { get; }
+    public AppSession Owner { get; }
+    readonly ListeningForegroundService service = new();
+    public Fixture()
+    {
+        Handler.Reset(); VoiceForegroundService.Reset(); Directory.CreateDirectory(Root);
+        listeningPack = Pack.Load(Path.Combine(AppContext.BaseDirectory, "PlayAlong.pack.json"));
+        GamePack = Json.Read<Pack>(Path.Combine(AppContext.BaseDirectory, "NativeFixture.json"));
+        GamePack.Root = Root; File.WriteAllBytes(Path.Combine(Root, "sample.wav"), [0]); GamePack.Validate();
+        Native = GamePack.Nodes.First(n => n.Id != "audit-other" && n.Kind == "line");
+        Session = new(new(Root), this, () => AppSession.Current!.InvokeBeforeListening(), new(), null, () => 1, () => true);
+        Owner = new() { Listening = Session, Engine = new PlaybackEngine(GamePack) }; AppSession.Current = Owner;
+        Session.Open(listeningPack.Id, "pa"); Session.SetPolicy(ListeningBranchPolicy.Manual);
+        service.OnCreate(); service.OnStartCommand(null, 0, 1);
+    }
+    public void AtBranch()
+    {
+        Session.Play();
+        for (int i = 0; i < 100 && !Session.PlayTogglesCountdown; i++) Handler.Advance(100);
+        if (!Session.PlayTogglesCountdown || Session.CountdownRemaining != 15) throw new Exception("未进入合成夹具分支倒计时：" + Session.Status);
+    }
+    public void Dispose() { if (!service.Destroyed) service.OnDestroy(); Handler.Reset(); VoiceForegroundService.Reset(); }
+    public Pack Load(string packId) => listeningPack;
+    public IReadOnlyList<InstalledPackage> List() => [];
+    public InstalledPackage? Find(string packId) => null;
+    public void CleanAbandonedImports() { }
+    public Task<InstalledPackage> ImportAsync(Stream stream, CancellationToken cancellationToken = default, IProgress<PackageImportProgress>? progress = null) => throw new NotSupportedException();
+    public Task<PackageRemovalResult> RemoveAsync(string packId, string revision) => throw new NotSupportedException();
+    public PackageFolder Browse(string packId, string relativePath = "", string? revision = null) => throw new NotSupportedException();
+}

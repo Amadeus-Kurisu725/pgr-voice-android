@@ -1,0 +1,214 @@
+using PgrVoice.AndroidApp.Contracts;
+
+// 系统 API 替身；生产的 ListeningSession、前台服务及媒体回调原样编译。
+// 虚拟时钟让 5 分钟服务空闲回调实际执行，不等待真实墙钟。
+namespace Android.OS
+{
+    public interface IBinder { }
+    public static class Looper { public static object MainLooper { get; } = new(); }
+    public static class SystemClock { public static long Now; public static long ElapsedRealtime() => Now; }
+    public sealed class Handler(object looper)
+    {
+        static readonly List<(Handler Owner, Action Action, long At)> queue = [];
+        public void Post(Action action) => action();
+        public void PostDelayed(Action action, long delay) => queue.Add((this, action, SystemClock.Now + delay));
+        public void RemoveCallbacks(Action action) => queue.RemoveAll(x => x.Owner == this && x.Action == action);
+        public void RemoveCallbacksAndMessages(object? token) => queue.RemoveAll(x => x.Owner == this);
+        public static void Reset() { queue.Clear(); SystemClock.Now = 0; }
+        public static Action? IdleCallback => queue.FirstOrDefault(x => x.At - SystemClock.Now >= 299_000).Action;
+        public static void Advance(long milliseconds)
+        {
+            long target = SystemClock.Now + milliseconds;
+            for (int i = 0; i < 100_000; i++)
+            {
+                var ready = queue.Where(x => x.At <= target).OrderBy(x => x.At).FirstOrDefault();
+                if (ready.Action == null) { SystemClock.Now = target; return; }
+                queue.Remove(ready); SystemClock.Now = ready.At; ready.Action();
+            }
+            throw new Exception("计时夹具队列未收敛");
+        }
+    }
+    public enum WakeLockFlags { Partial }
+    public sealed class PowerManager
+    {
+        public WakeLock? Latest;
+        public WakeLock NewWakeLock(WakeLockFlags flags, string tag) => Latest = new();
+        public sealed class WakeLock : IDisposable
+        {
+            public bool IsHeld { get; private set; }
+            public void SetReferenceCounted(bool value) { }
+            public void Acquire() => IsHeld = true;
+            public void Release() => IsHeld = false;
+            public void Dispose() => Release();
+        }
+    }
+}
+namespace Android.Content
+{
+    [Flags] public enum ActivityFlags { SingleTop = 1, NewTask = 2 }
+    public class Context
+    {
+        public Context(string directory) { FilesDir = new(directory); }
+        public Context() : this(Path.Combine(Path.GetTempPath(), "listening-media-service")) { }
+        public sealed record DirectoryRef(string AbsolutePath);
+        public DirectoryRef FilesDir { get; }
+        public const string NotificationService = "notification", PowerService = "power";
+        public static readonly Android.App.NotificationManager Notifications = new();
+        public static readonly Android.OS.PowerManager Power = new();
+        public object GetSystemService(string name) => name == PowerService ? Power : Notifications;
+        public void StartForegroundService(Intent intent) => throw new Exception("夹具必须先建立受控服务");
+    }
+    public sealed class Intent
+    {
+        public Intent(Context context, Type type) { }
+        public string? Action { get; private set; }
+        public Intent SetAction(string action) { Action = action; return this; }
+        public Intent AddFlags(ActivityFlags flags) => this;
+        public void PutExtra(string key, string value) { }
+    }
+}
+namespace Android.Content.PM
+{
+    [Flags] public enum ForegroundService { TypeMediaPlayback = 1 }
+}
+namespace Android.Runtime
+{
+    [AttributeUsage(AttributeTargets.Class)] public sealed class RegisterAttribute(string name) : Attribute { }
+}
+namespace Android.Graphics.Drawables
+{
+    public sealed class Icon { public static Icon CreateWithResource(Android.Content.Context c, int resource) => new(); }
+}
+namespace Android
+{
+    public static class Resource { public static class Drawable { public const int IcMediaPlay = 1, IcMediaPause = 2, IcMediaPrevious = 3, IcMediaNext = 4, IcMenuCloseClearCancel = 5; } }
+}
+namespace Android.App
+{
+    [AttributeUsage(AttributeTargets.Class)] public sealed class ServiceAttribute : Attribute
+    { public bool Exported { get; set; } public Android.Content.PM.ForegroundService ForegroundServiceType { get; set; } }
+    public enum StartCommandFlags { None }
+    public enum StartCommandResult { NotSticky }
+    public enum StopForegroundFlags { Remove }
+    public enum NotificationImportance { Low }
+    public enum NotificationVisibility { Public }
+    [Flags] public enum PendingIntentFlags { Immutable = 1, UpdateCurrent = 2 }
+    public class Service : Android.Content.Context
+    {
+        public bool Destroyed { get; private set; }
+        public int StopCount { get; private set; }
+        public virtual void OnCreate() { }
+        public virtual StartCommandResult OnStartCommand(Android.Content.Intent? intent, StartCommandFlags flags, int id) => StartCommandResult.NotSticky;
+        public virtual Android.OS.IBinder? OnBind(Android.Content.Intent? intent) => null;
+        public virtual void OnDestroy() => Destroyed = true;
+        public void StopSelf() { StopCount++; if (!Destroyed) OnDestroy(); }
+        public void StartForeground(int id, Notification notification, Android.Content.PM.ForegroundService type) { }
+        public void StopForeground(StopForegroundFlags flags) { }
+    }
+    public sealed class NotificationChannel(string id, string name, NotificationImportance importance) { public string? Description { get; set; } }
+    public sealed class NotificationManager
+    { public Notification? Last; public void CreateNotificationChannel(NotificationChannel channel) { } public void Notify(int id, Notification notification) => Last = notification; }
+    public sealed class PendingIntent
+    {
+        public static PendingIntent GetService(Android.Content.Context c, int id, Android.Content.Intent intent, PendingIntentFlags flags) => new();
+        public static PendingIntent GetActivity(Android.Content.Context c, int id, Android.Content.Intent intent, PendingIntentFlags flags) => new();
+    }
+    public sealed class Notification
+    {
+        public readonly List<Action> Actions = [];
+        public sealed record Action(string Title)
+        { public sealed class Builder(Android.Graphics.Drawables.Icon icon, string title, PendingIntent intent) { public Action Build() => new(title); } }
+        public sealed class MediaStyle
+        { public MediaStyle SetMediaSession(object token) => this; public MediaStyle SetShowActionsInCompactView(params int[] indexes) => this; }
+        public sealed class Builder(Android.Content.Context context, string channel)
+        {
+            readonly Notification result = new();
+            public Builder SetSmallIcon(int icon) => this;
+            public Builder SetContentTitle(string title) => this;
+            public Builder SetContentText(string text) => this;
+            public Builder SetSubText(string text) => this;
+            public Builder SetVisibility(NotificationVisibility visibility) => this;
+            public Builder SetContentIntent(PendingIntent intent) => this;
+            public Builder SetOnlyAlertOnce(bool value) => this;
+            public Builder SetOngoing(bool value) => this;
+            public Builder SetStyle(MediaStyle style) => this;
+            public Builder AddAction(Action action) { result.Actions.Add(action); return this; }
+            public Notification Build() => result;
+        }
+    }
+}
+namespace Android.Media
+{
+    public sealed class MediaMetadata : IDisposable
+    {
+        public const string MetadataKeyTitle = "title", MetadataKeyArtist = "artist", MetadataKeyDisplaySubtitle = "subtitle", MetadataKeyDuration = "duration";
+        public void Dispose() { }
+        public sealed class Builder
+        { public Builder PutString(string key, string text) => this; public Builder PutLong(string key, long value) => this; public MediaMetadata Build() => new(); }
+    }
+}
+namespace Android.Media.Session
+{
+    public enum PlaybackStateCode { Playing, Paused }
+    public sealed class PlaybackState : IDisposable
+    {
+        public const long ActionPlay = 1, ActionPause = 2, ActionPlayPause = 4, ActionSkipToNext = 8, ActionSkipToPrevious = 16, ActionStop = 32, ActionSeekTo = 64;
+        public PlaybackStateCode Code;
+        public void Dispose() { }
+        public sealed class Builder
+        {
+            PlaybackStateCode code;
+            public Builder SetActions(long actions) => this;
+            public Builder SetState(PlaybackStateCode value, long position, float speed, long time) { code = value; return this; }
+            public PlaybackState Build() => new() { Code = code };
+        }
+    }
+    public sealed class MediaSession : IDisposable
+    {
+        public static MediaSession? Latest;
+        public MediaSession(Android.Content.Context c, string name) => Latest = this;
+        public Callback? Receiver;
+        public PlaybackState? State;
+        public bool Active { get; set; }
+        public object SessionToken { get; } = new();
+        public void SetCallback(Callback callback, Android.OS.Handler handler) => Receiver = callback;
+        public void SetMetadata(Android.Media.MediaMetadata metadata) { }
+        public void SetPlaybackState(PlaybackState state) => State = state;
+        public void Release() => Active = false;
+        public void Dispose() { }
+        public abstract class Callback
+        {
+            public virtual void OnPlay() { } public virtual void OnPause() { } public virtual void OnSkipToNext() { }
+            public virtual void OnSkipToPrevious() { } public virtual void OnStop() { } public virtual void OnSeekTo(long position) { }
+        }
+    }
+}
+namespace PgrVoice.AndroidApp
+{
+    public sealed class MainActivity { }
+    public sealed class AppSession
+    {
+        public static AppSession? Current;
+        public required ListeningSession Listening { get; init; }
+        public static AppSession Get(Android.Content.Context context) => Current!;
+    }
+    public sealed class SessionDiagnostics { public void Log(string kind, string message) { } }
+}
+namespace PgrVoice.AndroidApp.Platform
+{
+    public sealed class AndroidAudioPlayer(Android.Content.Context context) : IDisposable
+    {
+        public event Action<long>? PlaybackCompleted;
+        public event Action<string>? Error;
+        public event Action<string>? Interrupted;
+        public AudioStrategy Strategy { get; set; }
+        public bool Playing { get; private set; }
+        public long PositionMilliseconds { get; set; }
+        public long DurationMilliseconds => 10_000;
+        public void SetVolume(float volume) { }
+        public void SetSpeed(float speed) { }
+        public long PlayTagged(string file, long position) { Playing = true; PositionMilliseconds = position; return 1; }
+        public void Stop() => Playing = false;
+        public void Dispose() => Stop();
+    }
+}

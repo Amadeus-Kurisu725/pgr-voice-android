@@ -156,6 +156,16 @@ Test("停止重启和超时撤销标点停顿，不能接管已绑定音频", ()
     c.Stop(); Require(c.SilentPauseUntil==0&&!c.CompleteSilentPause(epoch,"a",13301),"停止未撤销停顿");
     c.Start("a",14000); Require(!c.CompleteSilentPause(epoch,"a",14001),"旧轮停顿影响重启");
 });
+Test("原配句等游戏原声：延长待点击期限，不发点击，旧轮与已点击状态不能延长", () =>
+{
+    var c=Playing(); long epoch=c.Epoch;
+    Require(!c.HoldTapping(epoch,"a",9000),"播放中即可延长");
+    Require(c.CompleteAudio(epoch,1,1200)&&c.HoldTapping(epoch,"a",9000)&&c.TapTicket==0,"占位音频播完后未能等待原声");
+    Require(!c.TimedOut(12999)&&c.TimedOut(13000),"期限未按原声结束后4秒计算");
+    Require(!c.HoldTapping(epoch-1,"a",9000)&&!c.HoldTapping(epoch,"b",9000),"旧轮或错误节点可延长");
+    Require(c.BeginTap(epoch,"b",9001)&&!c.HoldTapping(epoch,"a",20000),"已发点击后仍可延长");
+    c.Stop(); Require(!c.HoldTapping(epoch,"a",20000),"停止后仍可延长");
+});
 string output=args.ElementAtOrDefault(0)??"reports/android-autoplay-cycle.json";
 string source=Path.GetFullPath("android/AutoPlaybackCycle.cs");
 var report=new { createdUtc=DateTimeOffset.UtcNow, passed=failures==0, count=results.Count, failures, tests=results,

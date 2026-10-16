@@ -17,3 +17,16 @@ artifacts/
 *.jks
 *.p12
 signing-secret.json
+
+# 游戏衍生数据属于游戏厂商内容，本仓库不转载。
+# 代码对缺失有降级处理（BundledStoryReference / BundledRouteRepairs / BundledAvatars / BundledCovers
+# 均 catch 后返回空集合），缺这些文件仍可编译，只是对应增强功能不可用。
+StoryReference.*.zip
+PackCorrections.*.zip
+NativeVoiceCatalog.json
+RouteRepairs.*.json.gz
+SourceChoices.*.json
+Assets/avatars/
+Assets/covers/
+android/Assets/avatars/
+android/Assets/covers/

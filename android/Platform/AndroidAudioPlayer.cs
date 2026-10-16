@@ -81,7 +81,11 @@ public sealed class AndroidAudioPlayer : Java.Lang.Object, AudioManager.IOnAudio
 
     public long PlayTagged(string file) => PlayTagged(file, 0);
 
-    public long PlayTagged(string file, long positionMilliseconds)
+    public long PlayTaggedWithoutFocus(string file) => PlayCore(file, 0, false);
+
+    public long PlayTagged(string file, long positionMilliseconds) => PlayCore(file, positionMilliseconds, true);
+
+    private long PlayCore(string file, long positionMilliseconds, bool withFocus)
     {
         // Invalidate on the calling thread, before a pending main-looper callback can run.
         long ticket = Interlocked.Increment(ref requestVersion);
@@ -94,7 +98,7 @@ public sealed class AndroidAudioPlayer : Java.Lang.Object, AudioManager.IOnAudio
                 if (!File.Exists(file)) throw new FileNotFoundException("这一句音频文件缺失", file);
                 if (audioManager.Mode != Mode.Normal) { Interrupted?.Invoke("通话或其他语音会话正在使用音频，请结束后重播。"); return; }
                 EnsurePlayer();
-                if (strategy != AudioStrategy.Simultaneous && !RequestFocus())
+                if (withFocus && strategy != AudioStrategy.Simultaneous && !RequestFocus())
                 { Interrupted?.Invoke("暂时无法取得音频焦点，请稍后重播。"); return; }
                 completionDelivered = false;
                 playRequested = true;

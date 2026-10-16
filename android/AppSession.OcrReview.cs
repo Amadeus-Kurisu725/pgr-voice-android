@@ -37,7 +37,7 @@ public sealed partial class AppSession
     public bool PrepareRecognizedTextCandidates()
     {
         var engine = Engine; var evidence = lastOcrReviewEvidence;
-        if (Listening.IsPlaying) Listening.Pause();
+        Listening.PauseForGame();
         Invalidate(); audio.Stop(); engine?.PauseForBrowse();
         if (IsImporting || !ReferenceEquals(Engine, engine) || !ReferenceEquals(evidence, lastOcrReviewEvidence) ||
             !IsCurrentOcrReviewEvidence(evidence, engine))

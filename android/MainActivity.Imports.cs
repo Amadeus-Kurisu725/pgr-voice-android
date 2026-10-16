@@ -2,6 +2,7 @@ using Android.App;
 using Android.Content;
 using Android.Widget;
 using PgrVoice.AndroidApp.Platform;
+using PgrVoice.AndroidApp.Ui;
 using PgrVoice.Packages;
 
 namespace PgrVoice.AndroidApp;
@@ -28,25 +29,30 @@ public sealed partial class MainActivity
         importCancellation = cancellation;
         var outcomes = new List<ZipImportOutcome>();
         var box = new LinearLayout(this) { Orientation = Orientation.Vertical };
-        box.SetPadding(Dp(20), Dp(10), Dp(20), Dp(12));
-        var file = Text("准备读取所选 ZIP…", 15); box.AddView(file);
-        var stage = Text("", 12); box.AddView(stage);
+        box.AddView(PgrTheme.Eyebrow(this, "IMPORT · ZIP"));
+        var file = Text("准备读取所选 ZIP…", 15); file.SetTypeface(PgrTheme.SansMedium, global::Android.Graphics.TypefaceStyle.Normal); PgrTheme.Tabular(file); box.AddView(file);
+        var stage = Text("", 12); stage.SetTextColor(PgrTheme.Secondary); box.AddView(stage);
         var bar = new ProgressBar(this, null, global::Android.Resource.Attribute.ProgressBarStyleHorizontal)
             { Max = selected.Count, Progress = 0 };
+        PgrTheme.StyleProgress(bar);
         box.AddView(bar);
-        box.AddView(Text("按顺序逐个处理。取消会停止当前及后续导入，已完成的章节会保留。", 12));
-        importDialog = new AlertDialog.Builder(this).SetTitle($"导入 {selected.Count} 个 ZIP")!
-            .SetView(box)!.SetCancelable(false)!.SetNegativeButton("取消导入", (_, _) => { })!.Create();
+        var note = Text("按顺序逐个处理。取消会停止当前及后续导入，已完成的章节会保留。", 12); note.SetTextColor(PgrTheme.Muted); box.AddView(note);
         void UpdateImportStage() { if (alive) stage.Text = session.Status; }
         session.Changed += UpdateImportStage;
         try
         {
-            importDialog!.Show(); StyleDialog(importDialog);
-            var cancel = importDialog.GetButton((int)DialogButtonType.Negative)!;
-            cancel.Click += (_, _) =>
+            // 18-B NOTICE shell, not cancelable by back / outside; 「取消导入」 stays open while the import winds down.
+            var keys = new List<Button>();
+            Button? cancel = null;
+            importDialog = PgrDialog("NOTICE", $"导入 {selected.Count} 个 ZIP", box, new[]
             {
-                cancellation.Cancel(); cancel.Enabled = false; cancel.Text = "正在取消…";
-            };
+                new DialogKey("取消导入", Xb.Normal, "close", () =>
+                {
+                    cancellation.Cancel(); if (cancel != null) { cancel.Enabled = false; cancel.Text = "正在取消…"; }
+                }, Keep: true)
+            }, cancelable: false, buttons: keys);
+            importDialog.SetCanceledOnTouchOutside(false);
+            cancel = keys[0];
             Render();
             for (int i = 0; i < selected.Count; i++)
             {
@@ -101,8 +107,8 @@ public sealed partial class MainActivity
         int success = outcomes.Count(r => r.Package != null), failed = outcomes.Count - success;
         int remaining = total - outcomes.Count;
         var box = new LinearLayout(this) { Orientation = Orientation.Vertical };
-        box.SetPadding(Dp(18), Dp(8), Dp(18), Dp(12));
-        box.AddView(Text($"成功 {success} · 失败 {failed} · 未完成 {remaining}", 17));
+        box.AddView(PgrTheme.Eyebrow(this, "IMPORT · REPORT"));
+        var tally = Text($"成功 {success} · 失败 {failed} · 未完成 {remaining}", 17); tally.SetTypeface(PgrTheme.SansBold, global::Android.Graphics.TypefaceStyle.Bold); PgrTheme.Tabular(tally); box.AddView(tally);
         if (remaining > 0) box.AddView(Text("已取消剩余导入，已成功导入的章节继续保留。", 13));
         if (success > 0) box.AddView(Text("点成功项管理文件，可删除原 ZIP 或查看解压目录。", 12));
         AlertDialog? dialog = null;
@@ -111,11 +117,15 @@ public sealed partial class MainActivity
             if (result.Package is { } pack)
                 Button(box, (pack.IsUpdate ? "已更新 · " : "已导入 · ") + result.Name,
                     () => { dialog?.Dismiss(); ManagePackage(pack.PackId); });
-            else box.AddView(Text("失败 · " + result.Name + "\n" + result.Error, 13));
+            else
+            {
+                var failure = Text("失败 · " + result.Name + "\n" + result.Error, 13);
+                failure.Background = PgrTheme.Plate(this, PgrTheme.Selection, PgrTheme.SelectionLine, PgrTheme.CutSmall, Corners.BottomRight, PgrTheme.Red, AccentEdge.Left);
+                failure.SetPadding(Dp(14), Dp(8), Dp(12), Dp(8));
+                box.AddView(failure, new LinearLayout.LayoutParams(-1, -2) { TopMargin = Dp(3), BottomMargin = Dp(3) });
+            }
         }
-        var scroll = new ScrollView(this); scroll.AddView(box);
-        dialog = new AlertDialog.Builder(this).SetTitle(remaining > 0 ? "导入已取消" : "导入结果")!
-            .SetView(scroll)!.SetPositiveButton("完成", (_, _) => { })!.Create();
-        dialog!.Show(); StyleDialog(dialog);
+        // 18-B NOTICE shell (body scrolls inside the dialog); texts and per-item actions unchanged.
+        dialog = PgrDialog("NOTICE", remaining > 0 ? "导入已取消" : "导入结果", box, new[] { new DialogKey("完成", Xb.Primary, null, null) });
     }
 }

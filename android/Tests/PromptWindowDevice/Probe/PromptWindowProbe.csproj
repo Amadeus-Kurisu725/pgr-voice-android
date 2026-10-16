@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-android</TargetFramework>
+    <SupportedOSPlatformVersion>29</SupportedOSPlatformVersion>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>PgrVoice.AndroidApp</RootNamespace>
+    <ApplicationId>cn.pgrvoice.promptprobe</ApplicationId>
+    <ApplicationTitle>提示窗设备测试</ApplicationTitle>
+    <ApplicationVersion>1</ApplicationVersion>
+    <ApplicationDisplayVersion>test-only</ApplicationDisplayVersion>
+    <RuntimeIdentifier>android-x64</RuntimeIdentifier>
+    <Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings>
+    <AndroidPackageFormats>apk</AndroidPackageFormats>
+    <EmbedAssembliesIntoApk>true</EmbedAssembliesIntoApk>
+    <PublishTrimmed>false</PublishTrimmed><RunAOTCompilation>false</RunAOTCompilation>
+    <AndroidLinkMode>None</AndroidLinkMode><AndroidEnableMarshalMethods>false</AndroidEnableMarshalMethods>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultAndroidItems>false</EnableDefaultAndroidItems>
+    <ProductAndroid>$(MSBuildThisFileDirectory)..\..\..\</ProductAndroid>
+    <AndroidManifest>..\..\..\Properties\AndroidManifest.xml</AndroidManifest>
+    <DefineConstants Condition="'$(Baseline)' == 'true'">$(DefineConstants);PROBE_BASELINE</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(ProductAndroid)**\*.cs" Exclude="$(ProductAndroid)Tests\**;$(ProductAndroid)obj\**;$(ProductAndroid)bin\**" />
+    <Compile Include="PromptWindowProbe.cs" />
+    <Compile Include="ListeningProbe.cs" />
+    <EmbeddedResource Include="..\..\ListeningDefaultBranch\PlayAlong.pack.json" LogicalName="PromptWindowDevice.PlayAlong.pack.json" />
+    <AndroidResource Include="$(ProductAndroid)Resources\**\*" Link="Resources\%(RecursiveDir)%(Filename)%(Extension)" />
+    <AndroidAsset Include="$(ProductAndroid)Assets\**\*" Link="Assets\%(RecursiveDir)%(Filename)%(Extension)" />
+    <EmbeddedResource Include="$(ProductAndroid)RouteRepairs.20261009.json.gz" LogicalName="PgrVoice.RouteRepairs.20261009.json.gz" />
+    <EmbeddedResource Include="$(ProductAndroid)SourceChoices.20261009.json" LogicalName="PgrVoice.SourceChoices.20261009.json" />
+    <EmbeddedResource Include="$(ProductAndroid)StoryReference.20261009.zip" LogicalName="PgrVoice.StoryReference.20261009.zip" />
+    <ProjectReference Include="..\Core\PromptWindowCore.csproj" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.30.0" />
+    <PackageReference Include="Xamarin.AndroidX.Media3.ExoPlayer" Version="1.11.0" />
+    <PackageReference Include="Xamarin.Google.MLKit.TextRecognition.Chinese" Version="116.0.1.8" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Baseline)' == 'true'">
+    <Compile Remove="$(ProductAndroid)Platform\OverlayController.PromptBar.cs;$(ProductAndroid)Platform\OverlayController.BranchEntered.cs;$(ProductAndroid)Platform\GameAdvanceAccessibilityService.cs;$(ProductAndroid)PromptBarTouchLease.cs;$(ProductAndroid)AppSession.PromptBars.cs" />
+    <Compile Include="..\Baseline\*.cs.txt" />
+  </ItemGroup>
+</Project>

@@ -1043,6 +1043,17 @@
         "type": "Project"
       }
     },
+    "net10.0-android36.0/android-arm64": {
+      "Microsoft.ML.OnnxRuntime": {
+        "type": "Direct",
+        "requested": "[1.30.0, )",
+        "resolved": "1.30.0",
+        "contentHash": "RaF3KjPXB/IbNvvrcQtrxS/NZjB9dEHnZQTsdJCLP5Fnn1Jj3LomeqR1mMAoRFKinJ0pIe85PLhLlfGBYqzgWA==",
+        "dependencies": {
+          "Microsoft.ML.OnnxRuntime.Managed": "1.30.0"
+        }
+      }
+    },
     "net10.0-android36.0/android-x64": {
       "Microsoft.ML.OnnxRuntime": {
         "type": "Direct",

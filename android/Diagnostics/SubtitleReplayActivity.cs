@@ -93,7 +93,7 @@ public sealed class SubtitleReplayActivity : Activity
             {
                 AtMs = Elapsed, Stage = stageIndex, NodeId = node?.Id,
                 AudioExists = node?.Audio != null && File.Exists(observedEngine.Pack.ResolveAudio(node)),
-                Notice = node == null ? "" : observedEngine.Pack.AudioNotice(node)
+                Notice = node == null ? "" : PgrVoice.Listening.PendingVoice.Notice(observedEngine.Pack, node)
             });
             observedEngine.PlayRequested += playObserver;
             var start = observedEngine.Pack.ById.GetValueOrDefault(script.StartNodeId)

@@ -1,0 +1,94 @@
+using PgrVoice;
+using PgrVoice.AndroidApp.Platform;
+
+// 系统 / UI 受控替身；生产方法在每次运行时由 run.py 原样抽取并记录哈希。
+namespace PgrVoice.AndroidApp
+{
+    public sealed partial class AppSession
+    {
+        public PlaybackEngine? Engine { get; set; }
+        public AuditSettings Settings { get; } = new();
+        public AuditAudio GameAudio => audio;
+        public int Invalidations { get; private set; }
+        public bool OverlayVisible => overlay.Visible;
+        public bool NativePlaying => playingNative;
+        public long NativeUntil => nativeVoiceUntil;
+        public string Status { get; private set; } = "";
+        public string? SectionId;
+        public event Action? ContentChanged;
+        public event Action? CapturePermissionRequested;
+        readonly Android.Content.Context context = new();
+        readonly AuditAudio audio = new();
+        readonly AuditOverlay overlay = new();
+        readonly AutoPlaybackCycle autoPlay = new();
+        long playGeneration;
+        object? lastMask;
+        readonly AuditStability stability = new();
+        readonly AuditScreen Screen = new();
+        bool PackagesBusy => false;
+        void Invalidate() { Invalidations++; playGeneration++; autoPlay.Stop(); }
+        void SaveProgress() { }
+        void SaveSettings() { }
+        void Notify() { }
+        Task UnloadOcrAfterStopAsync() => Task.CompletedTask;
+        public void InvokeBeforeListening() => PrepareListening();
+        public void PlayGameNode(Node node) => PlayNode(Engine!, node);
+        public void CancelPendingPlayback() => Invalidate();
+        public void SetOverlayVisible() => overlay.Show();
+        bool IsSilentPunctuation(Node node) => false;
+        bool PassesWithoutVoice(Node node) => false;
+        bool CheckAutoPlaybackEnvironment() => true;
+        bool AutoLinePermitted(PlaybackEngine owner) => true;
+        void StartAutoSilentPause(PlaybackEngine owner, Node node, long request, int? pendingVoiceMilliseconds = null) => throw new Exception("本专项不应进入自动播放停留分支");
+        void PauseAutoPlayback(string reason) { autoPlay.Stop(); Status = reason; }
+        object? DraftAfterSingleLine(PlaybackEngine engine) => null;
+        bool FollowDraftAfterSingleLine(PlaybackEngine engine, object? draft, string? beforeId, string? beforePending) => false;
+        void TryFollowDraftContinuation(PlaybackEngine engine) { }
+        void QueueFrameRequest(FrameRequest request) { }
+        sealed record FrameRequest(bool OverlayResult = false);
+        sealed class AuditStability { public void Reset() { } }
+        sealed class AuditScreen { public bool CaptureActive => false; }
+        sealed class AuditOverlay
+        {
+            public bool Visible;
+            public void Show() => Visible = true;
+            public void Hide() => Visible = false;
+            public void ClearAutoPlaybackPaused() { }
+        }
+    }
+    public sealed class AuditSettings
+    {
+        public bool NativeVoiceMute = true;
+        public HashSet<string> NativeVoiceDubPacks { get; } = [];
+        public float Volume = .8f;
+        public Dictionary<string, int> SpeakerVolumes { get; } = [];
+        public bool OcrFullScreen = true;
+    }
+    public sealed class AuditAudio
+    {
+        public float Volume { get; private set; }
+        public int FocusPlays { get; private set; }
+        public int NoFocusPlays { get; private set; }
+        public int Stops { get; private set; }
+        public int Plays => FocusPlays + NoFocusPlays;
+        public void SetVolume(float volume) => Volume = volume;
+        public long PlayTagged(string file) { FocusPlays++; return Plays; }
+        public long PlayTaggedWithoutFocus(string file) { NoFocusPlays++; return Plays; }
+        public void Stop() => Stops++;
+    }
+    public static class UiText { public const string PendingVoiceManual = "字幕"; }
+}
+namespace PgrVoice.AndroidApp.Platform
+{
+    public static class VoiceForegroundService
+    {
+        public static bool DelayReady;
+        public static List<Action> Pending { get; } = [];
+        public static void EnsureStarted(Android.Content.Context context) { }
+        public static void EnsureStarted(Android.Content.Context context, Action callback)
+        { if (DelayReady) Pending.Add(callback); else callback(); }
+        public static void StopAll(Android.Content.Context context) { }
+        public static void Reset() { DelayReady = false; Pending.Clear(); }
+        public static void Flush() { var calls = Pending.ToArray(); Pending.Clear(); foreach (var call in calls) call(); }
+    }
+}
